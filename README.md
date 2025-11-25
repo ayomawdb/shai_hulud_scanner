@@ -164,6 +164,19 @@ The scanner automatically:
 - Deduplicates entries across all files
 - Sorts libraries alphabetically
 
+## Semantic Versioning Range Detection
+
+The scanner intelligently handles npm's semantic versioning ranges:
+
+- **Lock files** (`package-lock.json`, `pnpm-lock.yaml`): Exact version matching
+- **package.json**: Checks if vulnerable version satisfies the semver range
+
+Example: Searching for vulnerable `lodash@4.17.20`:
+- `"lodash": "^4.17.0"` → **DETECTED** (range allows 4.17.20)
+- `"lodash": "^4.17.21"` → **SAFE** (range requires >=4.17.21)
+
+See [SEMVER_HANDLING.md](SEMVER_HANDLING.md) for detailed documentation.
+
 ## Output Files
 
 All outputs are written to `outputs/<org>.*`:

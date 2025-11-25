@@ -15,6 +15,7 @@ from dataclasses import asdict
 from .models import SearchResult, AffectedRepository, ScanState, ScanReport
 from .branches import BranchDiscoveryResult, RepoWithBranches, BranchInfo
 from .output import Colors, log_progress, log_detection, log_debug, log_info
+from .semver import is_vulnerable_in_range
 
 
 class BranchScanner:
@@ -144,7 +145,10 @@ class BranchScanner:
     def _check_package_json(
         self, content: str, lib_name: str, lib_version: str
     ) -> Optional[list[tuple[int, str]]]:
-        """Check if package.json contains the compromised library."""
+        """
+        Check if package.json contains the compromised library.
+        Uses semver range matching to detect if vulnerable version satisfies the range.
+        """
         try:
             pkg_data = json.loads(content)
         except json.JSONDecodeError:
@@ -155,7 +159,8 @@ class BranchScanner:
             deps = pkg_data.get(dep_type, {})
             if lib_name in deps:
                 version_spec = deps[lib_name]
-                if version_spec == lib_version or lib_version in version_spec:
+                # Check if the vulnerable version satisfies the semver range
+                if is_vulnerable_in_range(lib_version, version_spec):
                     # Find line numbers
                     lines = content.split('\n')
                     matched = []

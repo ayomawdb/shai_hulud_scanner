@@ -7,6 +7,7 @@ from typing import Optional
 
 from .models import PackageCache, SearchResult, LibraryFinding, AffectedRepository
 from .output import log_progress, log_detection, log_debug, log_info
+from .semver import is_vulnerable_in_range
 
 
 class LocalScanner:
@@ -33,16 +34,28 @@ class LocalScanner:
 
         return None
 
-    def _check_version_match(self, found_version: str, search_version: str) -> bool:
+    def _check_version_match(self, found_version: str, search_version: str, file_path: str = '') -> bool:
         """
         Check if versions match.
-        Handles exact matches and cases where search version is contained in found version.
-        """
-        # Remove common prefixes like ^, ~, >=, etc.
-        clean_found = found_version.lstrip('^~>=<')
-        clean_search = search_version.lstrip('^~>=<')
 
-        return clean_found == clean_search or clean_search in clean_found
+        For lock files (package-lock.json, pnpm-lock.yaml): exact version match
+        For package.json: check if vulnerable version satisfies the semver range
+
+        Args:
+            found_version: The version found in the file (may be exact or a range)
+            search_version: The vulnerable version we're searching for
+            file_path: The file path to determine if it's a lock file or package.json
+        """
+        # For lock files, we have exact versions - do exact match
+        if 'lock' in file_path.lower():
+            # Remove common prefixes like ^, ~, >=, etc. from both versions
+            clean_found = found_version.lstrip('^~>=<')
+            clean_search = search_version.lstrip('^~>=<')
+            return clean_found == clean_search or clean_search in clean_found
+
+        # For package.json, the found_version might be a range like "^4.17.0"
+        # Check if the vulnerable search_version would satisfy this range
+        return is_vulnerable_in_range(search_version, found_version)
 
     def scan_libraries(self, libraries: list[tuple[str, str]]) -> list[SearchResult]:
         """
@@ -78,8 +91,8 @@ class LocalScanner:
             if line_number:
                 url = f"{pkg_file.html_url}#L{line_number}"
 
-            # Check if versions match
-            is_match = self._check_version_match(found_version, lib_version)
+            # Check if versions match (pass file_path for semver range checking)
+            is_match = self._check_version_match(found_version, lib_version, pkg_file.file_path)
 
             # Record finding (even if version doesn't match)
             finding = LibraryFinding(

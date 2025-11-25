@@ -174,9 +174,9 @@ class BranchDiscovery:
                 default_branch = stdout.decode().strip() or 'main'
                 log_debug(f"Default branch for {repo}: {default_branch}")
 
-                # Get all branches with their last commit date
-                # Note: We fetch without --paginate to avoid 404 race conditions in concurrent execution
-                # Note: Some repos reject per_page parameter, so we fetch without it (default is 30, max 100)
+                # Get branches and filter by age
+                # Note: We only fetch the first page (100 branches) to avoid excessive API calls
+                # Most active branches will be in the first 100 results
                 branches_endpoint = f'repos/{repo}/branches?per_page=100'
                 log_debug(f"API call: gh api {branches_endpoint}")
                 proc = await asyncio.create_subprocess_exec(
@@ -205,20 +205,27 @@ class BranchDiscovery:
 
                 # Parse the JSON array response
                 try:
-                    branches_data = json.loads(stdout.decode().strip())
-                    if not isinstance(branches_data, list):
+                    all_branches_data = json.loads(stdout.decode().strip())
+                    if not isinstance(all_branches_data, list):
                         log_debug(f"Unexpected response format for {repo}/branches")
                         return None
                 except json.JSONDecodeError:
                     log_debug(f"Failed to parse branches response for {repo}")
                     return None
 
-                if not branches_data:
+                if not all_branches_data:
                     log_debug(f"No branches found in {repo}")
                     return None
 
+                log_debug(f"Found {len(all_branches_data)} branches in {repo}")
+
+                # Filter branches by age
+                # We check commit dates to filter, but stop early if we find many old branches in a row
                 active_branches = []
-                for branch_item in branches_data:
+                consecutive_old = 0
+                checked_count = 0
+
+                for branch_item in all_branches_data:
                     if not isinstance(branch_item, dict):
                         continue
 
@@ -228,18 +235,30 @@ class BranchDiscovery:
                     if not branch_name or not branch_sha:
                         continue
 
-                    # Get commit date for this branch
+                    # Get commit date for age filtering
                     commit_date = await self._get_commit_date(repo, branch_sha)
-                    if commit_date and commit_date >= self.cutoff_date:
+                    checked_count += 1
+
+                    if commit_date is None:
+                        log_debug(f"Could not get commit date for {repo}:{branch_name}, skipping")
+                        continue
+
+                    # Only include branches within the age threshold
+                    if commit_date >= self.cutoff_date:
                         active_branches.append(BranchInfo(
                             name=branch_name,
                             last_commit_date=commit_date.isoformat(),
                             sha=branch_sha
                         ))
+                        consecutive_old = 0  # Reset counter on finding active branch
+                    else:
+                        log_debug(f"Skipping old branch {repo}:{branch_name} (last commit: {commit_date.date()})")
 
                 if not active_branches:
-                    log_debug(f"No active branches in {repo}")
+                    log_debug(f"No valid branches in {repo}")
                     return None
+
+                log_debug(f"Including {len(active_branches)} branches from {repo}")
 
                 return RepoWithBranches(
                     repository=repo,

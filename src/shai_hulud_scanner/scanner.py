@@ -20,6 +20,7 @@ except ImportError:
 
 from .models import SearchResult, AffectedRepository, ScanState, ScanReport, LibraryFinding
 from .output import Colors, log_progress, log_detection, log_debug, log_info
+from .semver import is_vulnerable_in_range
 
 
 class GitHubScanner:
@@ -227,7 +228,12 @@ class GitHubScanner:
                         matched.append((line_no, line))
 
             # Check if versions match
-            is_match = found_version == lib_version or lib_version in found_version
+            # For lock files: exact match
+            # For package.json: check if vulnerable version satisfies the range
+            if 'lock' in file_path.lower():
+                is_match = found_version == lib_version or lib_version in found_version
+            else:
+                is_match = is_vulnerable_in_range(lib_version, found_version)
 
             if not is_match:
                 log_debug(f"Version mismatch: {lib_name}@{lib_version} vs found {found_version} in {repo}/{file_path}")
