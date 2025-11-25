@@ -1,5 +1,7 @@
 """Command-line interface for the scanner."""
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
@@ -9,6 +11,7 @@ import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from .models import ScanReport
 from .output import log_info, log_error, log_warn, print_header, print_summary, set_debug
@@ -30,19 +33,53 @@ def check_prerequisites():
         sys.exit(1)
 
 
-def load_libraries(csv_path: str) -> list[tuple[str, str]]:
-    """Load libraries from CSV file."""
-    libraries = []
-    with open(csv_path, 'r') as f:
+def parse_library_line(line: str) -> Optional[tuple[str, str]]:
+    """
+    Parse a library line in format: package-name-version
+    The version is everything after the last hyphen that starts with a digit.
+    Handles scoped packages like @scope/package-name-1.0.0
+    """
+    line = line.strip()
+    if not line or line.startswith('#'):
+        return None
+
+    # Find the last hyphen followed by a digit (version separator)
+    # We need to find where the version starts
+    last_hyphen = -1
+    for i in range(len(line) - 1, -1, -1):
+        if line[i] == '-' and i + 1 < len(line) and line[i + 1].isdigit():
+            last_hyphen = i
+            break
+
+    if last_hyphen == -1:
+        return None
+
+    lib_name = line[:last_hyphen]
+    lib_version = line[last_hyphen + 1:]
+
+    if not lib_name or not lib_version:
+        return None
+
+    return (lib_name, lib_version)
+
+
+def load_libraries(file_path: str) -> list[tuple[str, str]]:
+    """
+    Load libraries from file.
+    Supports format: package-name-version (one per line)
+    Automatically deduplicates and sorts the list.
+    """
+    libraries_set: set[tuple[str, str]] = set()
+
+    with open(file_path, 'r') as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            parts = line.split(',')
-            if len(parts) >= 2:
-                lib_name = parts[0].strip()
-                lib_version = parts[1].strip()
-                libraries.append((lib_name, lib_version))
+            parsed = parse_library_line(line)
+            if parsed:
+                libraries_set.add(parsed)
+
+    # Sort by library name, then by version
+    libraries = sorted(libraries_set, key=lambda x: (x[0].lower(), x[1]))
+
     return libraries
 
 
@@ -72,13 +109,15 @@ async def async_main(args: argparse.Namespace) -> int:
     check_prerequisites()
 
     if not Path(args.file).exists():
-        log_error(f"CSV file not found: {args.file}")
+        log_error(f"Input file not found: {args.file}")
         return 1
 
     libraries = load_libraries(args.file)
     if not libraries:
-        log_error("No libraries found in CSV file")
+        log_error("No libraries found in input file")
         return 1
+
+    log_info(f"Loaded {len(libraries)} unique libraries (deduplicated and sorted)")
 
     # Branch scanning mode
     if args.scan_branches:

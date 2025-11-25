@@ -39,19 +39,25 @@ PYTHONPATH=src python -m shai_hulud_scanner -g <github-org> -f <libraries.csv>
 | `--branch-age` | Only scan branches with commits in last N days | 30 |
 | `--branches-file` | JSON file to save/load discovered branches | `<output>.branches.json` |
 
-### CSV Format
+### Input File Format
 
-```csv
-# Comments start with #
-library-name,library-version
-event-stream,3.3.6
-ua-parser-js,0.7.29
+The input file should contain one library per line in the format `package-name-version`:
+
 ```
+# Comments start with #
+event-stream-3.3.6
+ua-parser-js-0.7.29
+@scope/package-name-1.0.0
+```
+
+The scanner automatically:
+- Deduplicates entries
+- Sorts libraries alphabetically
 
 ### Example
 
 ```bash
-shai-hulud-scanner -g my-org -f compromised.csv -c 20 -o results.json
+shai-hulud-scanner -g my-org -f compromised.txt -c 20 -o results.json
 ```
 
 ## Output

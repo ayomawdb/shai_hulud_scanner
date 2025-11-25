@@ -1,8 +1,0 @@
-# Example compromised libraries CSV
-# Format: library-name,library-version
-# Known supply chain attack examples:
-acorn,5.2.1
-event-stream,3.3.6
-ua-parser-js,0.7.29
-rc,1.2.9
-colors,1.4.1
