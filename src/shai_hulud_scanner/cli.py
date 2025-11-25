@@ -19,6 +19,8 @@ from .output import log_info, log_error, log_warn, print_header, print_summary, 
 from .scanner import GitHubScanner
 from .branches import BranchDiscovery, save_branches, load_branches
 from .branch_scanner import BranchScanner
+from .package_fetcher import PackageFetcher, save_cache, load_cache
+from .local_scanner import LocalScanner
 
 
 # Default paths relative to package root
@@ -190,6 +192,7 @@ def get_output_paths(outputs_dir: Path, org: str) -> dict:
         'duplicates': f"{base}.duplicates.txt",
         'state': f"{base}.json.state",
         'branches': f"{base}.branches.json",
+        'cache': f"{base}.packages.json",
     }
 
 
@@ -199,6 +202,40 @@ async def async_main(args: argparse.Namespace) -> int:
         set_debug(True)
 
     check_prerequisites()
+
+    # Parse repos if provided
+    repos: Optional[list[str]] = None
+    if args.repos:
+        # Check if it's a file or comma-separated list
+        if Path(args.repos).is_file():
+            repos = load_repos_from_file(args.repos)
+            log_info(f"Loaded {len(repos)} repositories from {args.repos}")
+        else:
+            # Treat as comma-separated list
+            repos = []
+            for item in args.repos.split(','):
+                parsed = parse_repo_url(item.strip())
+                if parsed:
+                    repos.append(parsed)
+            log_info(f"Scanning {len(repos)} specified repositories")
+
+        if not repos:
+            log_error("No valid repositories found in --repos")
+            return 1
+
+    # Validate arguments
+    if not args.org and not repos:
+        log_error("Either --org or --repos is required")
+        return 1
+
+    # Determine scan name for output files
+    if repos:
+        # Use first repo owner or 'repos' as the scan name
+        scan_name = repos[0].split('/')[0] if repos else 'repos'
+        if len(repos) > 1:
+            scan_name = f"{scan_name}-{len(repos)}repos"
+    else:
+        scan_name = args.org
 
     # Determine paths
     pkg_root = get_package_root()
@@ -219,12 +256,12 @@ async def async_main(args: argparse.Namespace) -> int:
         log_error("No libraries found in lists/ directory")
         return 1
 
-    log_info(f"Loaded {len(libraries)} unique libraries (deduplicated and sorted)")
+    log_info(f"Loaded {len(libraries)} unique libraries (deduplicated)")
     if duplicates:
         log_info(f"Removed {len(duplicates)} duplicate entries")
 
     # Get output paths
-    paths = get_output_paths(outputs_dir, args.org)
+    paths = get_output_paths(outputs_dir, scan_name)
     output_file = paths['results']
 
     # Write combined list to file for reference
@@ -238,10 +275,18 @@ async def async_main(args: argparse.Namespace) -> int:
 
     # Branch scanning mode
     if args.scan_branches:
+        if repos:
+            log_error("--scan-branches is not supported with --repos (use -g/--org instead)")
+            return 1
         return await run_branch_scan(args, libraries, paths)
 
-    # Default: code search mode
-    return await run_code_search_scan(args, libraries, paths)
+    # Check if we should use local scan mode (default) or legacy search mode
+    if args.use_search_api:
+        log_info("Using legacy GitHub Code Search API mode")
+        return await run_code_search_scan(args, libraries, paths, repos)
+    else:
+        # Default: local scan mode (much faster)
+        return await run_local_scan(args, libraries, paths, repos, scan_name)
 
 
 async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, str]], paths: dict) -> int:
@@ -394,6 +439,98 @@ async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[s
     return 0
 
 
+async def run_local_scan(
+    args: argparse.Namespace,
+    libraries: list[tuple[str, str]],
+    paths: dict,
+    repos: Optional[list[str]],
+    scan_name: str
+) -> int:
+    """Run local scan mode - fetch package files once, scan locally (default, fast mode)."""
+    output_file = paths['results']
+    cache_file = paths['cache']
+
+    # Use org name or repo info for display
+    if repos:
+        display_name = f"{len(repos)} repositories"
+        org_name = repos[0].split('/')[0]  # Use first repo's owner for org field
+    else:
+        display_name = args.org
+        org_name = args.org
+
+    # Phase 1: Fetch/load package file cache
+    cache = None
+    if not args.refresh_cache:
+        cache = load_cache(cache_file)
+        if cache:
+            log_info(f"Loaded package cache from {cache_file}")
+            log_info(f"  Cached at: {cache.fetched_at}")
+            log_info(f"  {cache.total_files} package files from {cache.repos_with_packages} repos")
+
+    if not cache or args.refresh_cache:
+        log_info("Fetching package files from repositories...")
+        fetcher = PackageFetcher(org_name, args.concurrency, repos)
+        cache = await fetcher.fetch_all()
+        save_cache(cache, cache_file)
+
+    if cache.total_files == 0:
+        log_warn("No package files found in repositories")
+        return 0
+
+    # Phase 2: Scan cached files locally
+    print_header(display_name, len(libraries), args.concurrency, output_file)
+
+    scanner = LocalScanner(cache)
+
+    try:
+        scanner.scan_libraries(libraries)
+
+        log_info("Scan complete. Generating report...")
+
+        # Write results
+        affected_repos = scanner.aggregate_results(scanner.results)
+        report = ScanReport(
+            scan_date=datetime.now(timezone.utc).isoformat(),
+            organization=org_name,
+            total_libraries_scanned=len(libraries),
+            affected_repositories=len(affected_repos),
+            results=[asdict(repo) for repo in affected_repos]
+        )
+
+        with open(output_file, 'w') as f:
+            json.dump(report.to_dict(), f, indent=2)
+
+        # Write detailed findings
+        findings_file = output_file.replace('.json', '.findings.json')
+        findings_data = {
+            'organization': org_name,
+            'generated_at': datetime.now(timezone.utc).isoformat(),
+            'total_findings': len(scanner.all_findings),
+            'matches': sum(1 for f in scanner.all_findings if f.is_match),
+            'non_matches': sum(1 for f in scanner.all_findings if not f.is_match),
+            'findings': [f.to_dict() for f in scanner.all_findings]
+        }
+        with open(findings_file, 'w') as f:
+            json.dump(findings_data, f, indent=2)
+
+        log_info(f"Results written to: {output_file}")
+        log_info(f"Detailed findings written to: {findings_file}")
+        print_summary(report, scanner.detection_count)
+
+        # Show findings summary
+        if scanner.all_findings:
+            non_matches = sum(1 for f in scanner.all_findings if not f.is_match)
+            if non_matches > 0:
+                log_info(f"Found {non_matches} repos with different versions of searched libraries (see {findings_file})")
+
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("", file=sys.stderr)
+        log_warn("Scan interrupted.")
+        return 130
+
+    return 0
+
+
 def print_header_branches(org: str, total_libs: int, total_branches: int, concurrency: int, output_file: str):
     """Print header for branch scanning mode."""
     from .output import Colors
@@ -438,12 +575,15 @@ def main() -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         prog='shai-hulud-scanner',
-        description='Scan GitHub organization for compromised npm libraries'
+        description='Scan GitHub organization or specific repositories for compromised npm libraries'
     )
     parser.add_argument(
         '-g', '--org',
-        required=True,
-        help='GitHub organization to scan'
+        help='GitHub organization to scan (required unless --repos is used)'
+    )
+    parser.add_argument(
+        '-r', '--repos',
+        help='File containing repository URLs to scan (one per line), or comma-separated list of repos'
     )
     parser.add_argument(
         '-c', '--concurrency',
@@ -471,6 +611,16 @@ def main() -> int:
         type=int,
         default=30,
         help='Only scan branches with commits in last N days (default: 30)'
+    )
+    parser.add_argument(
+        '--use-search-api',
+        action='store_true',
+        help='Use legacy GitHub Code Search API (slow, rate-limited). Default is local scan mode (fast).'
+    )
+    parser.add_argument(
+        '--refresh-cache',
+        action='store_true',
+        help='Force refresh of package file cache'
     )
 
     args = parser.parse_args()

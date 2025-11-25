@@ -79,3 +79,62 @@ class LibraryFinding:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class PackageFileInfo:
+    """Information about a package file in a repository."""
+    repository: str
+    file_path: str
+    html_url: str
+    dependencies: dict = field(default_factory=dict)  # name -> version mapping
+    raw_content: Optional[str] = None  # Original JSON content for line number lookup
+
+    def to_dict(self) -> dict:
+        return {
+            'repository': self.repository,
+            'file_path': self.file_path,
+            'html_url': self.html_url,
+            'dependencies': self.dependencies,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'PackageFileInfo':
+        return cls(
+            repository=data['repository'],
+            file_path=data['file_path'],
+            html_url=data['html_url'],
+            dependencies=data.get('dependencies', {}),
+        )
+
+
+@dataclass
+class PackageCache:
+    """Cache of all package files in an organization."""
+    organization: str
+    fetched_at: str
+    total_repos: int
+    total_files: int
+    repos_with_packages: int
+    files: list[PackageFileInfo] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            'organization': self.organization,
+            'fetched_at': self.fetched_at,
+            'total_repos': self.total_repos,
+            'total_files': self.total_files,
+            'repos_with_packages': self.repos_with_packages,
+            'files': [f.to_dict() for f in self.files],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'PackageCache':
+        return cls(
+            organization=data['organization'],
+            fetched_at=data['fetched_at'],
+            total_repos=data['total_repos'],
+            total_files=data['total_files'],
+            repos_with_packages=data['repos_with_packages'],
+            files=[PackageFileInfo.from_dict(f) for f in data.get('files', [])],
+        )
