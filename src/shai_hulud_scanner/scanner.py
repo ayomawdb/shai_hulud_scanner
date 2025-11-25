@@ -13,6 +13,11 @@ from typing import Optional, Callable
 
 from dataclasses import asdict
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 from .models import SearchResult, AffectedRepository, ScanState, ScanReport, LibraryFinding
 from .output import Colors, log_progress, log_detection, log_debug, log_info
 
@@ -148,7 +153,7 @@ class GitHubScanner:
         self, repo: str, file_path: str, lib_name: str, lib_version: str
     ) -> tuple[Optional[list[tuple[int, str]]], Optional[str], Optional[int]]:
         """
-        Fetch file content, parse JSON, and verify exact package match.
+        Fetch file content, parse JSON/YAML, and verify exact package match.
         Returns (matched_lines, found_version, found_line_number):
           - matched_lines: list of (line_number, line_content) if verified match, None otherwise
           - found_version: the actual version found in the file (even if not matching), None if library not found
@@ -169,14 +174,28 @@ class GitHubScanner:
 
             content = base64.b64decode(stdout.decode().strip()).decode('utf-8')
 
-            # Parse JSON and verify exact match
-            try:
-                pkg_data = json.loads(content)
-            except json.JSONDecodeError:
-                return None, None, None
+            # Parse file based on extension
+            is_yaml = 'pnpm-lock.yaml' in file_path
+            if is_yaml:
+                if yaml is None:
+                    raise ImportError(
+                        "PyYAML is required to parse pnpm-lock.yaml files. "
+                        "Install it with: pip install pyyaml"
+                    )
+                try:
+                    pkg_data = yaml.safe_load(content)
+                except Exception as e:
+                    log_debug(f"Error parsing YAML: {e}")
+                    return None, None, None
+            else:
+                # Parse JSON
+                try:
+                    pkg_data = json.loads(content)
+                except json.JSONDecodeError:
+                    return None, None, None
 
             # Find the actual version of the library in this file
-            found_version = self._find_library_version(pkg_data, lib_name)
+            found_version = self._find_library_version(pkg_data, lib_name, file_path)
 
             if not found_version:
                 # Library not actually in this file (search was too broad)
@@ -187,13 +206,23 @@ class GitHubScanner:
             found_line = None
             matched = []
             for line_no, line in enumerate(lines, start=1):
-                # Look for exact package name as a JSON key
-                if f'"{lib_name}"' in line:
-                    if found_line is None:
-                        found_line = line_no
-                    matched.append((line_no, line))
-                elif found_version in line:
-                    matched.append((line_no, line))
+                # Look for package name in the line
+                if is_yaml:
+                    # YAML format: look for package path like '/lodash/4.17.21' or 'lodash:'
+                    if f'/{lib_name}/' in line or f'{lib_name}:' in line:
+                        if found_line is None:
+                            found_line = line_no
+                        matched.append((line_no, line))
+                    elif found_version in line:
+                        matched.append((line_no, line))
+                else:
+                    # JSON format: look for exact package name as a JSON key
+                    if f'"{lib_name}"' in line:
+                        if found_line is None:
+                            found_line = line_no
+                        matched.append((line_no, line))
+                    elif found_version in line:
+                        matched.append((line_no, line))
 
             # Check if versions match
             is_match = found_version == lib_version or lib_version in found_version
@@ -210,12 +239,35 @@ class GitHubScanner:
             return None, None, None
 
     def _find_library_version(
-        self, pkg_data: dict, lib_name: str
+        self, pkg_data: dict, lib_name: str, file_path: str = ""
     ) -> Optional[str]:
         """
-        Find the version of a library in package.json or package-lock.json.
+        Find the version of a library in package.json, package-lock.json, or pnpm-lock.yaml.
         Returns the version string if found, None if library not present.
         """
+        # Handle pnpm-lock.yaml format
+        if 'pnpm-lock' in file_path and 'packages' in pkg_data:
+            packages = pkg_data.get('packages', {})
+            if isinstance(packages, dict):
+                for pkg_path in packages.keys():
+                    # pnpm format: '/@babel/core/7.12.0' or '/lodash/4.17.21'
+                    if pkg_path.startswith('/'):
+                        parts = pkg_path[1:].rsplit('/', 1)
+                        if len(parts) == 2:
+                            name, version = parts
+                            if name == lib_name:
+                                return version
+
+            # Also check dependencies section (older pnpm format)
+            if 'dependencies' in pkg_data:
+                deps = pkg_data.get('dependencies', {})
+                if isinstance(deps, dict) and lib_name in deps:
+                    dep_info = deps[lib_name]
+                    if isinstance(dep_info, str):
+                        return dep_info
+                    elif isinstance(dep_info, dict) and 'version' in dep_info:
+                        return dep_info['version']
+
         # Check package-lock.json structure (v2/v3)
         if 'packages' in pkg_data:
             for pkg_path, pkg_info in pkg_data.get('packages', {}).items():
@@ -240,13 +292,13 @@ class GitHubScanner:
         return None
 
     def _verify_package_match(
-        self, pkg_data: dict, lib_name: str, lib_version: str
+        self, pkg_data: dict, lib_name: str, lib_version: str, file_path: str = ""
     ) -> bool:
         """
-        Verify that the package.json or package-lock.json contains
+        Verify that the package.json, package-lock.json, or pnpm-lock.yaml contains
         an exact match for lib_name at lib_version.
         """
-        found_version = self._find_library_version(pkg_data, lib_name)
+        found_version = self._find_library_version(pkg_data, lib_name, file_path)
         if found_version:
             return found_version == lib_version or lib_version in found_version
         return False
@@ -300,10 +352,19 @@ class GitHubScanner:
         try:
             log_progress(index, total, f"Scanning: {lib_key}")
 
-            search_query = (
-                f'"{lib_name}" "{lib_version}" org:{self.org} '
-                f'filename:package.json OR filename:package-lock.json'
-            )
+            # Build search query with support for package.json, package-lock.json, and pnpm-lock.yaml
+            if self.repos:
+                # For specific repos, use repo: filter
+                repo_filter = ' '.join(f'repo:{repo}' for repo in self.repos)
+                search_query = (
+                    f'"{lib_name}" "{lib_version}" {repo_filter} '
+                    f'filename:package.json OR filename:package-lock.json OR filename:pnpm-lock.yaml'
+                )
+            else:
+                search_query = (
+                    f'"{lib_name}" "{lib_version}" org:{self.org} '
+                    f'filename:package.json OR filename:package-lock.json OR filename:pnpm-lock.yaml'
+                )
 
             log_debug(f"Query: {search_query}")
 

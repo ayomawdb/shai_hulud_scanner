@@ -1,4 +1,4 @@
-"""Fetch and cache package.json and package-lock.json files from GitHub repositories."""
+"""Fetch and cache package.json, package-lock.json, and pnpm-lock.yaml files from GitHub repositories."""
 
 from __future__ import annotations
 
@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 from .models import PackageCache, PackageFileInfo
 from .output import log_info, log_debug, log_progress, log_warn
 
@@ -17,7 +22,7 @@ class PackageFetcher:
     """Fetches package files from GitHub repositories and caches them locally."""
 
     # Files to look for in each repository
-    PACKAGE_FILES = ['package.json', 'package-lock.json']
+    PACKAGE_FILES = ['package.json', 'package-lock.json', 'pnpm-lock.yaml']
 
     def __init__(
         self,
@@ -104,15 +109,71 @@ class PackageFetcher:
 
     def _extract_dependencies(self, content: str, file_path: str) -> dict[str, str]:
         """
-        Extract all dependencies from a package.json or package-lock.json file.
+        Extract all dependencies from package.json, package-lock.json, or pnpm-lock.yaml.
         Returns a dict mapping package name to version.
         """
+        dependencies: dict[str, str] = {}
+
+        # Handle pnpm-lock.yaml
+        if 'pnpm-lock' in file_path:
+            if yaml is None:
+                raise ImportError(
+                    "PyYAML is required to parse pnpm-lock.yaml files. "
+                    "Install it with: pip install pyyaml"
+                )
+
+            try:
+                pkg_data = yaml.safe_load(content)
+            except Exception as e:
+                log_debug(f"Error parsing YAML: {e}")
+                return {}
+
+            if not isinstance(pkg_data, dict):
+                return {}
+
+            # pnpm-lock.yaml format has packages or dependencies keys
+            # Format: packages key contains entries like '/@babel/core/7.12.0' or '/lodash/4.17.21'
+            if 'packages' in pkg_data:
+                packages = pkg_data.get('packages', {})
+                if isinstance(packages, dict):
+                    for pkg_path, pkg_info in packages.items():
+                        if not isinstance(pkg_info, dict):
+                            continue
+
+                        # Extract package name and version from path like '/@babel/core/7.12.0' or '/lodash/4.17.21'
+                        if pkg_path.startswith('/'):
+                            parts = pkg_path[1:].rsplit('/', 1)  # Split from the right to get name and version
+                            if len(parts) == 2:
+                                name, version = parts
+                                # Handle scoped packages like '@babel/core'
+                                if name.startswith('@') or '/' in name:
+                                    dependencies[name] = version
+                                else:
+                                    dependencies[name] = version
+                            elif len(parts) == 1:
+                                # Sometimes version is in the pkg_info
+                                name = parts[0]
+                                version = pkg_info.get('version')
+                                if version:
+                                    dependencies[name] = version
+
+            # Also check dependencies section (older pnpm format)
+            if 'dependencies' in pkg_data:
+                deps = pkg_data.get('dependencies', {})
+                if isinstance(deps, dict):
+                    for name, version_info in deps.items():
+                        if isinstance(version_info, str):
+                            dependencies[name] = version_info
+                        elif isinstance(version_info, dict) and 'version' in version_info:
+                            dependencies[name] = version_info['version']
+
+            return dependencies
+
+        # Handle JSON files (package.json and package-lock.json)
         try:
             pkg_data = json.loads(content)
         except json.JSONDecodeError:
             return {}
-
-        dependencies: dict[str, str] = {}
 
         if 'package-lock' in file_path:
             # package-lock.json v2/v3 format (packages key)
