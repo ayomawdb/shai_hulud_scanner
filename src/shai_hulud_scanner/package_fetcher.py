@@ -48,12 +48,13 @@ class PackageFetcher:
         per_page = 100
 
         while True:
+            # Use query parameters in the URL instead of --field
+            api_endpoint = f'orgs/{self.org}/repos?per_page={per_page}&page={page}&type=all'
+            log_debug(f"API call: gh api {api_endpoint}")
+
             proc = await asyncio.create_subprocess_exec(
                 'gh', 'api',
-                f'orgs/{self.org}/repos',
-                '--field', f'per_page={per_page}',
-                '--field', f'page={page}',
-                '--field', 'type=all',
+                api_endpoint,
                 '--jq', '.[].full_name',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -62,6 +63,7 @@ class PackageFetcher:
 
             if proc.returncode != 0:
                 error = stderr.decode().strip()
+                log_debug(f"API error for '{api_endpoint}': {error}")
                 log_warn(f"Error listing repos: {error}")
                 break
 
@@ -71,6 +73,7 @@ class PackageFetcher:
 
             page_repos = output.split('\n')
             repos.extend(page_repos)
+            log_debug(f"Fetched page {page}: {len(page_repos)} repos (total so far: {len(repos)})")
 
             if len(page_repos) < per_page:
                 break

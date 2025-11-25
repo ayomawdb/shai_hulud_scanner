@@ -12,6 +12,11 @@ from typing import Optional
 
 from dataclasses import asdict
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 from .models import SearchResult, AffectedRepository, ScanState, ScanReport
 from .branches import BranchDiscoveryResult, RepoWithBranches, BranchInfo
 from .output import Colors, log_progress, log_detection, log_debug, log_info
@@ -131,12 +136,15 @@ class BranchScanner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, _ = await proc.communicate()
+            stdout, stderr = await proc.communicate()
 
             if proc.returncode != 0:
+                error_msg = stderr.decode().strip()
+                log_debug(f"File not found: {repo}/{file_path}@{branch} (error: {error_msg})")
                 return None
 
             content = base64.b64decode(stdout.decode().strip()).decode('utf-8')
+            log_debug(f"Successfully fetched: {repo}/{file_path}@{branch} ({len(content)} bytes)")
             return content
         except Exception as e:
             log_debug(f"Error fetching {repo}/{file_path}@{branch}: {e}")
@@ -206,6 +214,59 @@ class BranchScanner:
 
         return None
 
+    def _check_pnpm_lock(
+        self, content: str, lib_name: str, lib_version: str
+    ) -> Optional[list[tuple[int, str]]]:
+        """Check if pnpm-lock.yaml contains the compromised library."""
+        if yaml is None:
+            log_debug("PyYAML not installed, skipping pnpm-lock.yaml")
+            return None
+
+        try:
+            pkg_data = yaml.safe_load(content)
+        except Exception as e:
+            log_debug(f"Error parsing YAML: {e}")
+            return None
+
+        if not isinstance(pkg_data, dict):
+            return None
+
+        found = False
+
+        # Check pnpm-lock.yaml format (packages key)
+        if 'packages' in pkg_data:
+            packages = pkg_data.get('packages', {})
+            if isinstance(packages, dict):
+                for pkg_path in packages.keys():
+                    # pnpm format: '/@babel/core/7.12.0' or '/lodash/4.17.21'
+                    if pkg_path.startswith('/'):
+                        parts = pkg_path[1:].rsplit('/', 1)
+                        if len(parts) == 2:
+                            name, version = parts
+                            if name == lib_name and version == lib_version:
+                                found = True
+                                break
+
+        # Also check dependencies section (older pnpm format)
+        if not found and 'dependencies' in pkg_data:
+            deps = pkg_data.get('dependencies', {})
+            if isinstance(deps, dict) and lib_name in deps:
+                dep_info = deps[lib_name]
+                if isinstance(dep_info, str) and dep_info == lib_version:
+                    found = True
+                elif isinstance(dep_info, dict) and dep_info.get('version') == lib_version:
+                    found = True
+
+        if found:
+            lines = content.split('\n')
+            matched = []
+            for line_no, line in enumerate(lines, start=1):
+                if lib_name in line or lib_version in line:
+                    matched.append((line_no, line))
+            return matched[:10] if matched else [(1, f"{lib_name}@{lib_version}")]
+
+        return None
+
     def _check_deps_recursive(self, deps: dict, lib_name: str, lib_version: str) -> bool:
         """Recursively check dependencies."""
         if lib_name in deps:
@@ -240,11 +301,12 @@ class BranchScanner:
 
             results = []
 
-            # Fetch package.json and package-lock.json for this branch
+            # Fetch package.json, package-lock.json, and pnpm-lock.yaml for this branch
             pkg_json = await self._fetch_file(repo, 'package.json', branch.name)
             pkg_lock = await self._fetch_file(repo, 'package-lock.json', branch.name)
+            pnpm_lock = await self._fetch_file(repo, 'pnpm-lock.yaml', branch.name)
 
-            if not pkg_json and not pkg_lock:
+            if not pkg_json and not pkg_lock and not pnpm_lock:
                 log_debug(f"No package files in {repo}@{branch.name}")
                 async with self.results_lock:
                     self.scanned_items.add(scan_key)
@@ -269,6 +331,17 @@ class BranchScanner:
                     if matched:
                         result = await self._record_detection(
                             repo, branch.name, 'package-lock.json',
+                            lib_name, lib_version, matched, total
+                        )
+                        if result:
+                            results.append(result)
+
+                # Check pnpm-lock.yaml
+                if pnpm_lock:
+                    matched = self._check_pnpm_lock(pnpm_lock, lib_name, lib_version)
+                    if matched:
+                        result = await self._record_detection(
+                            repo, branch.name, 'pnpm-lock.yaml',
                             lib_name, lib_version, matched, total
                         )
                         if result:
