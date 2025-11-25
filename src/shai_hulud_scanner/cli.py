@@ -206,11 +206,22 @@ async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[s
 
         report = write_output(args.output, scanner, len(libraries))
 
+        # Write detailed findings file
+        scanner._write_findings()
+        findings_file = scanner._get_findings_file()
+
         # Clear state file on successful completion
         scanner.clear_state()
 
         log_info(f"Results written to: {args.output}")
+        log_info(f"Detailed findings written to: {findings_file}")
         print_summary(report, scanner.detection_count)
+
+        # Show findings summary
+        if scanner.all_findings:
+            non_matches = sum(1 for f in scanner.all_findings if not f.is_match)
+            if non_matches > 0:
+                log_info(f"Found {non_matches} repos with different versions of searched libraries (see {findings_file})")
 
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("", file=sys.stderr)  # Newline after ^C
@@ -218,6 +229,7 @@ async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[s
         # Save state one more time to ensure we have latest
         await scanner._save_state(len(libraries))
         scanner._write_output(len(libraries))
+        scanner._write_findings()
         return 130  # Standard exit code for SIGINT
 
     return 0

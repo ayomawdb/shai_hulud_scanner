@@ -12,8 +12,8 @@ from typing import Optional, Callable
 
 from dataclasses import asdict
 
-from .models import SearchResult, AffectedRepository, ScanState, ScanReport
-from .output import Colors, log_progress, log_detection, log_debug
+from .models import SearchResult, AffectedRepository, ScanState, ScanReport, LibraryFinding
+from .output import Colors, log_progress, log_detection, log_debug, log_info
 
 
 class GitHubScanner:
@@ -37,12 +37,35 @@ class GitHubScanner:
         self.scan_state: Optional[ScanState] = None
         # Track seen detections to avoid duplicates on resume (repo:file:lib@version)
         self.seen_detections: set[str] = set()
+        # Track all findings (including non-matching versions) for detailed report
+        self.all_findings: list[LibraryFinding] = []
 
     def _get_state_file(self) -> str:
         """Get the state file path based on output file."""
         if self.output_file:
             return f"{self.output_file}.state"
         return "scan-results.json.state"
+
+    def _get_findings_file(self) -> str:
+        """Get the detailed findings file path."""
+        if self.output_file:
+            base = self.output_file.rsplit('.', 1)[0]
+            return f"{base}.findings.json"
+        return "scan-results.findings.json"
+
+    def _write_findings(self):
+        """Write all findings (including non-matches) to detailed file."""
+        findings_file = self._get_findings_file()
+        findings_data = {
+            'organization': self.org,
+            'generated_at': datetime.now(timezone.utc).isoformat(),
+            'total_findings': len(self.all_findings),
+            'matches': sum(1 for f in self.all_findings if f.is_match),
+            'non_matches': sum(1 for f in self.all_findings if not f.is_match),
+            'findings': [f.to_dict() for f in self.all_findings]
+        }
+        with open(findings_file, 'w') as f:
+            json.dump(findings_data, f, indent=2)
 
     def _write_output(self, total_libraries: int):
         """Write current results to output file."""
@@ -119,10 +142,13 @@ class GitHubScanner:
 
     async def _fetch_and_verify(
         self, repo: str, file_path: str, lib_name: str, lib_version: str
-    ) -> Optional[list[tuple[int, str]]]:
+    ) -> tuple[Optional[list[tuple[int, str]]], Optional[str], Optional[int]]:
         """
         Fetch file content, parse JSON, and verify exact package match.
-        Returns list of (line_number, line_content) if verified, None if not a real match.
+        Returns (matched_lines, found_version, found_line_number):
+          - matched_lines: list of (line_number, line_content) if verified match, None otherwise
+          - found_version: the actual version found in the file (even if not matching), None if library not found
+          - found_line_number: line number where library was found (even for non-matches)
         """
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -135,7 +161,7 @@ class GitHubScanner:
             stdout, _ = await proc.communicate()
 
             if proc.returncode != 0:
-                return None
+                return None, None, None
 
             content = base64.b64decode(stdout.decode().strip()).decode('utf-8')
 
@@ -143,28 +169,71 @@ class GitHubScanner:
             try:
                 pkg_data = json.loads(content)
             except json.JSONDecodeError:
-                return None
+                return None, None, None
 
-            # Check if this is a real match by parsing the JSON structure
-            if not self._verify_package_match(pkg_data, lib_name, lib_version):
-                log_debug(f"False positive filtered: {lib_name}@{lib_version} in {repo}/{file_path}")
-                return None
+            # Find the actual version of the library in this file
+            found_version = self._find_library_version(pkg_data, lib_name)
 
-            # Find line numbers for matched content
+            if not found_version:
+                # Library not actually in this file (search was too broad)
+                return None, None, None
+
+            # Find line number where the library appears (for all cases)
             lines = content.split('\n')
+            found_line = None
             matched = []
             for line_no, line in enumerate(lines, start=1):
                 # Look for exact package name as a JSON key
                 if f'"{lib_name}"' in line:
+                    if found_line is None:
+                        found_line = line_no
                     matched.append((line_no, line))
-                elif lib_version in line:
+                elif found_version in line:
                     matched.append((line_no, line))
 
-            return matched[:10] if matched else [(1, f"{lib_name}@{lib_version}")]
+            # Check if versions match
+            is_match = found_version == lib_version or lib_version in found_version
+
+            if not is_match:
+                log_debug(f"Version mismatch: {lib_name}@{lib_version} vs found {found_version} in {repo}/{file_path}")
+                return None, found_version, found_line
+
+            matched_lines = matched[:10] if matched else [(1, f"{lib_name}@{lib_version}")]
+            return matched_lines, found_version, matched_lines[0][0] if matched_lines else found_line
 
         except Exception as e:
             log_debug(f"Error fetching {repo}/{file_path}: {e}")
-            return None
+            return None, None, None
+
+    def _find_library_version(
+        self, pkg_data: dict, lib_name: str
+    ) -> Optional[str]:
+        """
+        Find the version of a library in package.json or package-lock.json.
+        Returns the version string if found, None if library not present.
+        """
+        # Check package-lock.json structure (v2/v3)
+        if 'packages' in pkg_data:
+            for pkg_path, pkg_info in pkg_data.get('packages', {}).items():
+                if pkg_info.get('name') == lib_name:
+                    return pkg_info.get('version')
+                # Also check nested node_modules path
+                if pkg_path.endswith(f'node_modules/{lib_name}'):
+                    return pkg_info.get('version')
+
+        # Check package-lock.json v1 dependencies
+        if 'dependencies' in pkg_data:
+            version = self._find_in_dependencies(pkg_data['dependencies'], lib_name)
+            if version:
+                return version
+
+        # Check package.json dependencies
+        for dep_type in ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']:
+            deps = pkg_data.get(dep_type, {})
+            if lib_name in deps:
+                return deps[lib_name]
+
+        return None
 
     def _verify_package_match(
         self, pkg_data: dict, lib_name: str, lib_version: str
@@ -173,54 +242,35 @@ class GitHubScanner:
         Verify that the package.json or package-lock.json contains
         an exact match for lib_name at lib_version.
         """
-        # Check package-lock.json structure (v2/v3)
-        if 'packages' in pkg_data:
-            for pkg_path, pkg_info in pkg_data.get('packages', {}).items():
-                if pkg_info.get('name') == lib_name:
-                    if pkg_info.get('version') == lib_version:
-                        return True
-                # Also check nested node_modules path
-                if pkg_path.endswith(f'node_modules/{lib_name}'):
-                    if pkg_info.get('version') == lib_version:
-                        return True
-
-        # Check package-lock.json v1 dependencies
-        if 'dependencies' in pkg_data:
-            if self._check_dependencies(pkg_data['dependencies'], lib_name, lib_version):
-                return True
-
-        # Check package.json dependencies
-        for dep_type in ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']:
-            deps = pkg_data.get(dep_type, {})
-            if lib_name in deps:
-                version_spec = deps[lib_name]
-                # Exact version match or version in spec
-                if version_spec == lib_version or lib_version in version_spec:
-                    return True
-
+        found_version = self._find_library_version(pkg_data, lib_name)
+        if found_version:
+            return found_version == lib_version or lib_version in found_version
         return False
+
+    def _find_in_dependencies(
+        self, deps: dict, lib_name: str
+    ) -> Optional[str]:
+        """Recursively find library version in package-lock.json v1 format."""
+        if lib_name in deps:
+            dep_info = deps[lib_name]
+            if isinstance(dep_info, dict):
+                return dep_info.get('version')
+
+        # Check all nested dependencies
+        for _, dep_info in deps.items():
+            if isinstance(dep_info, dict) and 'dependencies' in dep_info:
+                version = self._find_in_dependencies(dep_info['dependencies'], lib_name)
+                if version:
+                    return version
+
+        return None
 
     def _check_dependencies(
         self, deps: dict, lib_name: str, lib_version: str
     ) -> bool:
         """Recursively check dependencies in package-lock.json v1 format."""
-        if lib_name in deps:
-            dep_info = deps[lib_name]
-            if isinstance(dep_info, dict):
-                if dep_info.get('version') == lib_version:
-                    return True
-                # Check nested dependencies
-                if 'dependencies' in dep_info:
-                    if self._check_dependencies(dep_info['dependencies'], lib_name, lib_version):
-                        return True
-
-        # Check all nested dependencies
-        for _, dep_info in deps.items():
-            if isinstance(dep_info, dict) and 'dependencies' in dep_info:
-                if self._check_dependencies(dep_info['dependencies'], lib_name, lib_version):
-                    return True
-
-        return False
+        found_version = self._find_in_dependencies(deps, lib_name)
+        return found_version == lib_version if found_version else False
 
     async def search_library(
         self, lib_name: str, lib_version: str, index: int, total: int
@@ -275,10 +325,32 @@ class GitHubScanner:
                             item = json.loads(line)
 
                             # Verify the match by fetching and parsing the actual file
-                            matched_lines = await self._fetch_and_verify(
+                            matched_lines, found_version, found_line = await self._fetch_and_verify(
                                 item['repository'], item['file'],
                                 lib_name, lib_version
                             )
+
+                            # If library was found (even with different version), record it
+                            if found_version:
+                                is_match = matched_lines is not None
+                                # Build URL with line number anchor
+                                finding_url = item['url']
+                                if found_line:
+                                    finding_url = f"{item['url']}#L{found_line}"
+                                finding = LibraryFinding(
+                                    repository=item['repository'],
+                                    file=item['file'],
+                                    url=finding_url,
+                                    searched_library=lib_name,
+                                    searched_version=lib_version,
+                                    found_version=found_version,
+                                    is_match=is_match,
+                                    line_number=found_line
+                                )
+                                async with self.results_lock:
+                                    self.all_findings.append(finding)
+                                    # Write findings file immediately
+                                    self._write_findings()
 
                             # Skip false positives (verification returned None)
                             if matched_lines is None:
@@ -291,11 +363,15 @@ class GitHubScanner:
                                 continue
 
                             first_line = matched_lines[0][0] if matched_lines else None
+                            # Build URL with line number anchor for detections
+                            detection_url = item['url']
+                            if first_line:
+                                detection_url = f"{item['url']}#L{first_line}"
 
                             result = SearchResult(
                                 repository=item['repository'],
                                 file=item['file'],
-                                url=item['url'],
+                                url=detection_url,
                                 library=lib_name,
                                 version=lib_version,
                                 line_number=first_line
@@ -304,7 +380,7 @@ class GitHubScanner:
 
                             log_detection(
                                 lib_name, lib_version,
-                                item['repository'], item['file'], item['url'],
+                                item['repository'], item['file'], detection_url,
                                 matched_lines=matched_lines
                             )
 

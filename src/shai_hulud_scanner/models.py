@@ -62,3 +62,20 @@ class ScanReport:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class LibraryFinding:
+    """Record of a library found during scanning (regardless of version match)."""
+    repository: str
+    file: str
+    url: str
+    searched_library: str      # The library we were searching for
+    searched_version: str      # The version we were looking for
+    found_version: str         # The actual version found in the repo
+    is_match: bool             # True if versions match (compromised), False if different version
+    branch: Optional[str] = None
+    line_number: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)

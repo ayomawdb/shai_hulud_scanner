@@ -77,6 +77,31 @@ Results stream in real-time as detections are found:
 
 JSON output is saved to the specified file with full details.
 
+## Output Files
+
+The scanner produces two output files:
+
+1. **`<output>.json`** - Compromised package detections (exact version matches)
+2. **`<output>.findings.json`** - Detailed findings including all library occurrences
+
+The findings file captures every repository where a searched library was found, even if the version doesn't match. This helps with:
+- Understanding library usage across the organization
+- Identifying repos that may need updates
+- Future analysis if new vulnerable versions are discovered
+
+Example findings entry:
+```json
+{
+  "repository": "my-org/web-app",
+  "file": "package-lock.json",
+  "url": "https://github.com/...",
+  "searched_library": "event-stream",
+  "searched_version": "3.3.6",
+  "found_version": "4.0.1",
+  "is_match": false
+}
+```
+
 ## Resume Support
 
 Scans can be interrupted (Ctrl+C) and resumed later. Progress is saved to `<output>.state`:
