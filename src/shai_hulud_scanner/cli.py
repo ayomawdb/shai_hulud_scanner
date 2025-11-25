@@ -262,7 +262,7 @@ async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, s
 
     if not discovery:
         log_info("Discovering active branches...")
-        discoverer = BranchDiscovery(args.org, args.branch_age, args.concurrency)
+        discoverer = BranchDiscovery(args.org, args.branch_age, args.concurrency, repo_prefix=getattr(args, 'repo_prefix', None))
         discovery = await discoverer.discover()
         save_branches(discovery, branches_file)
         log_info(f"Found {discovery.total_branches} active branches in {discovery.total_repos} repos")
@@ -331,7 +331,8 @@ async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[s
     scanner = GitHubScanner(
         args.org,
         args.concurrency,
-        output_file=output_file
+        output_file=output_file,
+        repo_prefix=getattr(args, 'repo_prefix', None)
     )
 
     # Check for existing state to resume
@@ -471,6 +472,10 @@ def main() -> int:
         type=int,
         default=30,
         help='Only scan branches with commits in last N days (default: 30)'
+    )
+    parser.add_argument(
+        '--repo-prefix',
+        help='Only scan repositories starting with this prefix'
     )
 
     args = parser.parse_args()
