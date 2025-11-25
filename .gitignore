@@ -39,3 +39,5 @@ htmlcov/
 # Output files
 scan-results.json
 *.log
+
+outputs/
