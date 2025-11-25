@@ -1,11 +1,12 @@
 # Shai-Hulud Scanner
 
-Scan GitHub organizations for compromised npm packages in `package.json` and `package-lock.json` files.
+Scan GitHub organizations for compromised npm packages in `package.json`, `package-lock.json`, and `pnpm-lock.yaml` files.
 
 ## Prerequisites
 
 - Python 3.9+
 - [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated
+- PyYAML (`pip install pyyaml`) - required for pnpm-lock.yaml support
 
 ## Installation
 
@@ -28,25 +29,64 @@ PYTHONPATH=src python -m shai_hulud_scanner -g <github-org>
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-g, --org` | GitHub organization to scan | Required |
+| `-g, --org` | GitHub organization(s) to scan | Required |
 | `-c, --concurrency` | Number of parallel searches | 10 |
 | `-d, --debug` | Show matched lines in output | Off |
 | `--fresh` | Start fresh, ignore saved state | Off |
 | `--scan-branches` | Scan all active branches (not just default) | Off |
 | `--branch-age` | Only scan branches with commits in last N days | 30 |
+| `--use-search-api` | Use legacy GitHub Code Search API (slower) | Off |
+| `--refresh-cache` | Refresh package file cache (local scan mode) | Off |
 
-### Example
+### Examples
 
 ```bash
-# Scan an organization
+# Scan a single organization
 shai-hulud-scanner -g my-org
+
+# Scan multiple organizations (comma-separated)
+shai-hulud-scanner -g org1,org2,org3
+
+# Scan multiple organizations from a file
+shai-hulud-scanner -g orgs.txt
 
 # Scan with higher concurrency
 shai-hulud-scanner -g my-org -c 20
 
 # Scan all active branches
 shai-hulud-scanner -g my-org --scan-branches
+
+# Refresh the package cache and re-scan
+shai-hulud-scanner -g my-org --refresh-cache
 ```
+
+### Multiple Organizations
+
+You can scan multiple organizations in several ways:
+
+1. **From a text file** (one org per line):
+   ```bash
+   shai-hulud-scanner -g orgs.txt
+   ```
+
+   Example `orgs.txt`:
+   ```
+   # List of organizations to scan
+   my-org
+   another-org
+   third-org
+   ```
+
+2. **Comma-separated list**:
+   ```bash
+   shai-hulud-scanner -g org1,org2,org3
+   ```
+
+When scanning multiple organizations:
+- Each org is scanned sequentially
+- Separate output files are generated for each org in `outputs/`
+- The same library list is used for all organizations
+- A final summary shows success/failure for each org
 
 ## Directory Structure
 

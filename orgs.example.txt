@@ -1,0 +1,11 @@
+# Example organizations file
+# One organization per line
+# Lines starting with # are ignored
+
+# Example organizations (replace with your own)
+your-org-name
+another-org
+third-org
+
+# You can also add inline comments
+some-org  # This is a comment

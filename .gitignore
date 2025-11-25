@@ -41,3 +41,4 @@ scan-results.json
 *.log
 
 outputs/
+orgs.txt
