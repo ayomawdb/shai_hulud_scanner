@@ -23,10 +23,12 @@ class GitHubScanner:
         org: str,
         concurrency: int = 10,
         output_file: Optional[str] = None,
-        on_detection: Optional[Callable[[SearchResult], None]] = None
+        on_detection: Optional[Callable[[SearchResult], None]] = None,
+        repo_prefix: Optional[str] = None
     ):
         self.org = org
         self.concurrency = concurrency
+        self.repo_prefix = repo_prefix
         self.semaphore = asyncio.Semaphore(concurrency)
         self.rate_limit_delay = 0.3
         self.results: list[SearchResult] = []
@@ -362,6 +364,13 @@ class GitHubScanner:
                     if line:
                         try:
                             item = json.loads(line)
+                            
+                            # Filter by prefix if specified
+                            if self.repo_prefix:
+                                repo_name = item['repository'].split('/', 1)[1] if '/' in item['repository'] else item['repository']
+                                if not repo_name.startswith(self.repo_prefix):
+                                    log_debug(f"Skipping {item['repository']} (prefix mismatch)")
+                                    continue
 
                             # Verify the match by fetching and parsing the actual file
                             matched_lines, found_version, found_line = await self._fetch_and_verify(

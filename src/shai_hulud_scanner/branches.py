@@ -86,10 +86,11 @@ class BranchDiscoveryResult:
 class BranchDiscovery:
     """Discovers active branches across an organization."""
 
-    def __init__(self, org: str, max_age_days: int = 30, concurrency: int = 10):
+    def __init__(self, org: str, max_age_days: int = 30, concurrency: int = 10, repo_prefix: Optional[str] = None):
         self.org = org
         self.max_age_days = max_age_days
         self.concurrency = concurrency
+        self.repo_prefix = repo_prefix
         self.semaphore = asyncio.Semaphore(concurrency)
         self.cutoff_date = datetime.now(timezone.utc) - timedelta(days=max_age_days)
 
@@ -124,14 +125,28 @@ class BranchDiscovery:
                 break
 
             page_repos = output.split('\n')
-            repos.extend(page_repos)
+            
+            # Filter by prefix if specified
+            if self.repo_prefix:
+                filtered_repos = []
+                for r in page_repos:
+                    # r is "org/repo", we want to check "repo"
+                    repo_name = r.split('/', 1)[1] if '/' in r else r
+                    if repo_name.startswith(self.repo_prefix):
+                        filtered_repos.append(r)
+                repos.extend(filtered_repos)
+            else:
+                repos.extend(page_repos)
 
             if len(page_repos) < per_page:
                 break
 
             page += 1
 
-        log_info(f"Found {len(repos)} repositories")
+        if self.repo_prefix:
+            log_info(f"Found {len(repos)} repositories matching prefix '{self.repo_prefix}'")
+        else:
+            log_info(f"Found {len(repos)} repositories")
         return repos
 
     async def get_repo_branches(self, repo: str, index: int, total: int) -> Optional[RepoWithBranches]:

@@ -10,7 +10,9 @@ Scan GitHub organizations for compromised npm packages in `package.json` and `pa
 ## Installation
 
 ```bash
-pip install -e .
+python3 -m venv venv
+source venv/bin/activate
+pip3 install -e .
 ```
 
 ## Usage
@@ -34,6 +36,7 @@ PYTHONPATH=src python -m shai_hulud_scanner -g <github-org>
 | `--fresh` | Start fresh, ignore saved state | Off |
 | `--scan-branches` | Scan all active branches (not just default) | Off |
 | `--branch-age` | Only scan branches with commits in last N days | 30 |
+| `--repo-prefix` | Only scan repositories starting with this prefix | None |
 
 ### Example
 
@@ -46,6 +49,9 @@ shai-hulud-scanner -g my-org -c 20
 
 # Scan all active branches
 shai-hulud-scanner -g my-org --scan-branches
+
+# Scan only repositories starting with "service-"
+shai-hulud-scanner -g my-org --repo-prefix service-
 ```
 
 ## Directory Structure
