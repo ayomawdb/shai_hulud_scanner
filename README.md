@@ -4,7 +4,7 @@ Scan GitHub organizations for compromised npm packages in `package.json` and `pa
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.9+
 - [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated
 
 ## Installation
@@ -15,18 +15,25 @@ pip install -e .
 
 ## Usage
 
+**Installed:**
 ```bash
 shai-hulud-scanner -g <github-org> -f <libraries.csv> [-c <concurrency>] [-o <output>]
 ```
 
+**From source (no install):**
+```bash
+PYTHONPATH=src python -m shai_hulud_scanner -g <github-org> -f <libraries.csv>
+```
+
 ### Options
--f 
+
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-g, --org` | GitHub organization to scan | Required |
 | `-f, --file` | CSV file with compromised libraries | Required |
 | `-c, --concurrency` | Number of parallel searches | 10 |
 | `-o, --output` | Output JSON file | scan-results.json |
+| `-d, --debug` | Show matched lines in output | Off |
 
 ### CSV Format
 

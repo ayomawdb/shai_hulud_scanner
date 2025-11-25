@@ -1,6 +1,9 @@
 """Output formatting and logging utilities."""
 
+from __future__ import annotations
+
 import sys
+from typing import Optional
 
 # Global debug flag
 DEBUG = False
@@ -45,7 +48,7 @@ def log_detection(
     repo: str,
     file: str,
     url: str,
-    matched_lines: list[str] | None = None
+    matched_lines: Optional[list[str]] = None
 ):
     print(f"{Colors.RED}{Colors.BOLD}[🚨 DETECTION]{Colors.NC} {lib}@{version}", file=sys.stderr)
     print(f"           Repository: {Colors.YELLOW}{repo}{Colors.NC}", file=sys.stderr)
