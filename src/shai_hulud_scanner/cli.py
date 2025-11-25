@@ -46,6 +46,9 @@ def load_libraries(csv_path: str) -> list[tuple[str, str]]:
 
 async def async_main(args: argparse.Namespace) -> int:
     """Async entry point."""
+    if args.debug:
+        set_debug(True)
+
     check_prerequisites()
 
     if not Path(args.file).exists():
@@ -109,6 +112,11 @@ def main() -> int:
         '-o', '--output',
         default='scan-results.json',
         help='Output file for results (default: scan-results.json)'
+    )
+    parser.add_argument(
+        '-d', '--debug',
+        action='store_true',
+        help='Enable debug output (show matched lines)'
     )
 
     args = parser.parse_args()
