@@ -28,7 +28,8 @@ class GitHubScanner:
         org: str,
         concurrency: int = 10,
         output_file: Optional[str] = None,
-        on_detection: Optional[Callable[[SearchResult], None]] = None
+        on_detection: Optional[Callable[[SearchResult], None]] = None,
+        repos: Optional[list[str]] = None
     ):
         self.org = org
         self.concurrency = concurrency
@@ -39,6 +40,7 @@ class GitHubScanner:
         self.detection_count = 0
         self.output_file = output_file
         self.on_detection = on_detection
+        self.repos = repos  # Optional list of specific repos to scan
         self.scanned_libraries: set[str] = set()
         self.scan_state: Optional[ScanState] = None
         # Track seen detections to avoid duplicates on resume (repo:file:lib@version)

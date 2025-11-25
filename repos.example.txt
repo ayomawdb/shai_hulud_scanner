@@ -1,0 +1,16 @@
+# Example repositories file
+# One repository per line
+# Supports various formats
+
+# Direct owner/repo format
+owner/repo-name
+
+# Full GitHub URLs
+https://github.com/owner/another-repo
+https://github.com/owner/third-repo.git
+
+# Short format
+github.com/owner/fourth-repo
+
+# Comments are ignored
+# owner/commented-repo

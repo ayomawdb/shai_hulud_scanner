@@ -29,7 +29,8 @@ PYTHONPATH=src python -m shai_hulud_scanner -g <github-org>
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-g, --org` | GitHub organization(s) to scan | Required |
+| `-g, --org` | GitHub organization(s) to scan | Required* |
+| `-r, --repos` | Specific repository/repositories to scan | Optional |
 | `-c, --concurrency` | Number of parallel searches | 10 |
 | `-d, --debug` | Show matched lines in output | Off |
 | `--fresh` | Start fresh, ignore saved state | Off |
@@ -37,6 +38,8 @@ PYTHONPATH=src python -m shai_hulud_scanner -g <github-org>
 | `--branch-age` | Only scan branches with commits in last N days | 30 |
 | `--use-search-api` | Use legacy GitHub Code Search API (slower) | Off |
 | `--refresh-cache` | Refresh package file cache (local scan mode) | Off |
+
+\* Either `--org` or `--repos` is required
 
 ### Examples
 
@@ -49,6 +52,12 @@ shai-hulud-scanner -g org1,org2,org3
 
 # Scan multiple organizations from a file
 shai-hulud-scanner -g orgs.txt
+
+# Scan specific repositories from a file
+shai-hulud-scanner -r repos.txt
+
+# Scan specific repositories (comma-separated)
+shai-hulud-scanner -r owner/repo1,owner/repo2
 
 # Scan with higher concurrency
 shai-hulud-scanner -g my-org -c 20
@@ -87,6 +96,43 @@ When scanning multiple organizations:
 - Separate output files are generated for each org in `outputs/`
 - The same library list is used for all organizations
 - A final summary shows success/failure for each org
+
+### Specific Repositories
+
+Instead of scanning an entire organization, you can scan specific repositories:
+
+1. **From a text file** (one repo per line):
+   ```bash
+   shai-hulud-scanner -r repos.txt
+   ```
+
+   Example `repos.txt`:
+   ```
+   # List of repositories to scan
+   owner/repo-name
+   https://github.com/owner/another-repo
+   https://github.com/owner/third-repo.git
+   ```
+
+2. **Comma-separated list**:
+   ```bash
+   shai-hulud-scanner -r owner/repo1,owner/repo2
+   ```
+
+Supported repository formats:
+- `owner/repo` - Direct format
+- `https://github.com/owner/repo` - Full URL
+- `https://github.com/owner/repo.git` - Git URL
+- `github.com/owner/repo` - Short URL
+
+**Branch Scanning**: `--scan-branches` works with both `--org` and `--repos` modes:
+```bash
+# Scan all active branches in specific repositories
+shai-hulud-scanner -r repos.txt --scan-branches
+
+# Scan branches with commits in the last 7 days
+shai-hulud-scanner -r repos.txt --scan-branches --branch-age 7
+```
 
 ## Directory Structure
 

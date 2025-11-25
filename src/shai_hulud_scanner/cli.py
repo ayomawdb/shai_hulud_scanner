@@ -59,6 +59,54 @@ def check_prerequisites():
         sys.exit(1)
 
 
+def parse_repo_url(url: str) -> Optional[str]:
+    """
+    Parse a GitHub repository URL and return the owner/repo format.
+    Supports formats:
+    - https://github.com/owner/repo
+    - https://github.com/owner/repo.git
+    - github.com/owner/repo
+    - owner/repo
+    """
+    url = url.strip()
+    if not url or url.startswith('#'):
+        return None
+
+    # Remove .git suffix if present
+    if url.endswith('.git'):
+        url = url[:-4]
+
+    # Handle full URLs
+    if 'github.com/' in url:
+        parts = url.split('github.com/')[-1].split('/')
+        if len(parts) >= 2:
+            return f"{parts[0]}/{parts[1]}"
+        return None
+
+    # Handle owner/repo format
+    if '/' in url and not url.startswith('http'):
+        parts = url.split('/')
+        if len(parts) == 2:
+            return url
+
+    return None
+
+
+def load_repos_from_file(file_path: str) -> list[str]:
+    """
+    Load repository URLs/names from a file.
+    Returns list of repos in owner/repo format.
+    One repo per line, supports comments with #.
+    """
+    repos = []
+    with open(file_path, 'r') as f:
+        for line in f:
+            parsed = parse_repo_url(line)
+            if parsed:
+                repos.append(parsed)
+    return repos
+
+
 def load_orgs_from_file(file_path: str) -> list[str]:
     """
     Load organization names from a file.
@@ -244,16 +292,16 @@ async def scan_single_org(
     try:
         # Branch scanning mode
         if args.scan_branches:
-            return await run_branch_scan(args, libraries, paths)
+            return await run_branch_scan(args, libraries, paths, None)
 
         # Check if we should use local scan mode (default) or legacy search mode
         if args.use_search_api:
             log_info(f"Scanning organization: {org} (using legacy GitHub Code Search API mode)")
-            return await run_code_search_scan(args, libraries, paths)
+            return await run_code_search_scan(args, libraries, paths, None)
         else:
             # Default: local scan mode (much faster)
             log_info(f"Scanning organization: {org} (using local scan mode)")
-            return await run_local_scan(args, libraries, paths, org)
+            return await run_local_scan(args, libraries, paths, None, org)
     finally:
         # Restore original org
         args.org = original_org
@@ -338,20 +386,45 @@ async def async_main(args: argparse.Namespace) -> int:
             # Single organization
             orgs = [args.org]
 
-    # Validate that we have at least one org
-    if not orgs:
-        log_error("--org is required")
+    # Parse repos if provided
+    repos: Optional[list[str]] = None
+    if args.repos:
+        # Check if it's a file or comma-separated list
+        if Path(args.repos).is_file():
+            repos = load_repos_from_file(args.repos)
+            log_info(f"Loaded {len(repos)} repositories from {args.repos}")
+        else:
+            # Treat as comma-separated list
+            repos = []
+            for item in args.repos.split(','):
+                parsed = parse_repo_url(item.strip())
+                if parsed:
+                    repos.append(parsed)
+            log_info(f"Scanning {len(repos)} specified repositories")
+
+        if not repos:
+            log_error("No valid repositories found in --repos")
+            return 1
+
+    # Validate arguments
+    if not orgs and not repos:
+        log_error("Either --org or --repos is required")
         return 1
 
-    # If multiple orgs, scan each one
-    if len(orgs) > 1:
+    # Repos mode takes precedence over multi-org mode
+    if repos:
+        # Use first repo's owner as the org name for display
+        org = repos[0].split('/')[0] if repos else 'repos'
+        scan_name = f"{org}-{len(repos)}repos" if len(repos) > 1 else repos[0].replace('/', '-')
+        args.org = org  # Set for internal functions that expect it
+    elif len(orgs) > 1:
+        # Multi-org mode
         return await scan_multiple_orgs(args, orgs)
-
-    # Single org mode
-    org = orgs[0]
-
-    # Update args.org to the selected org
-    args.org = org
+    else:
+        # Single org mode
+        org = orgs[0]
+        scan_name = org
+        args.org = org
 
     # Determine paths
     pkg_root = get_package_root()
@@ -377,7 +450,7 @@ async def async_main(args: argparse.Namespace) -> int:
         log_info(f"Removed {len(duplicates)} duplicate entries")
 
     # Get output paths
-    paths = get_output_paths(outputs_dir, org)
+    paths = get_output_paths(outputs_dir, scan_name)
 
     # Write combined list to file for reference
     write_combined_list(libraries, paths['libraries'])
@@ -390,18 +463,23 @@ async def async_main(args: argparse.Namespace) -> int:
 
     # Branch scanning mode
     if args.scan_branches:
-        return await run_branch_scan(args, libraries, paths)
+        return await run_branch_scan(args, libraries, paths, repos)
 
     # Check if we should use local scan mode (default) or legacy search mode
     if args.use_search_api:
         log_info("Using legacy GitHub Code Search API mode")
-        return await run_code_search_scan(args, libraries, paths)
+        return await run_code_search_scan(args, libraries, paths, repos)
     else:
         # Default: local scan mode (much faster)
-        return await run_local_scan(args, libraries, paths, org)
+        return await run_local_scan(args, libraries, paths, repos, scan_name)
 
 
-async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, str]], paths: dict) -> int:
+async def run_branch_scan(
+    args: argparse.Namespace,
+    libraries: list[tuple[str, str]],
+    paths: dict,
+    repos: Optional[list[str]] = None
+) -> int:
     """Run branch-based scanning."""
     branches_file = paths['branches']
     output_file = paths['results']
@@ -419,7 +497,7 @@ async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, s
 
     if not discovery:
         log_info("Discovering active branches...")
-        discoverer = BranchDiscovery(args.org, args.branch_age, args.concurrency)
+        discoverer = BranchDiscovery(args.org, args.branch_age, args.concurrency, repos)
         discovery = await discoverer.discover()
         save_branches(discovery, branches_file)
         log_info(f"Found {discovery.total_branches} active branches in {discovery.total_repos} repos")
@@ -481,14 +559,20 @@ async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, s
     return 0
 
 
-async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[str, str]], paths: dict) -> int:
-    """Run code search based scanning (default mode)."""
+async def run_code_search_scan(
+    args: argparse.Namespace,
+    libraries: list[tuple[str, str]],
+    paths: dict,
+    repos: Optional[list[str]] = None
+) -> int:
+    """Run code search based scanning (legacy mode)."""
     output_file = paths['results']
 
     scanner = GitHubScanner(
         args.org,
         args.concurrency,
-        output_file=output_file
+        output_file=output_file,
+        repos=repos
     )
 
     # Check for existing state to resume
@@ -555,14 +639,20 @@ async def run_local_scan(
     args: argparse.Namespace,
     libraries: list[tuple[str, str]],
     paths: dict,
+    repos: Optional[list[str]],
     scan_name: str
 ) -> int:
     """Run local scan mode - fetch package files once, scan locally (default, fast mode)."""
     output_file = paths['results']
     cache_file = paths['cache']
 
-    display_name = args.org
-    org_name = args.org
+    # Use org name or repo info for display
+    if repos:
+        display_name = f"{len(repos)} repositories"
+        org_name = repos[0].split('/')[0]  # Use first repo's owner for org field
+    else:
+        display_name = args.org
+        org_name = args.org
 
     # Phase 1: Fetch/load package file cache
     cache = None
@@ -575,7 +665,7 @@ async def run_local_scan(
 
     if not cache or args.refresh_cache:
         log_info("Fetching package files from repositories...")
-        fetcher = PackageFetcher(org_name, args.concurrency)
+        fetcher = PackageFetcher(org_name, args.concurrency, repos)
         cache = await fetcher.fetch_all()
         save_cache(cache, cache_file)
 

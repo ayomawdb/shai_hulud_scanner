@@ -84,17 +84,22 @@ class BranchDiscoveryResult:
 
 
 class BranchDiscovery:
-    """Discovers active branches across an organization."""
+    """Discovers active branches across an organization or specific repositories."""
 
-    def __init__(self, org: str, max_age_days: int = 30, concurrency: int = 10):
+    def __init__(self, org: str, max_age_days: int = 30, concurrency: int = 10, repos: Optional[list[str]] = None):
         self.org = org
         self.max_age_days = max_age_days
         self.concurrency = concurrency
+        self.repos = repos  # Optional list of specific repos to scan
         self.semaphore = asyncio.Semaphore(concurrency)
         self.cutoff_date = datetime.now(timezone.utc) - timedelta(days=max_age_days)
 
     async def list_repos(self) -> list[str]:
-        """List all repositories in the organization."""
+        """List all repositories in the organization or return the specified repos."""
+        if self.repos:
+            log_info(f"Using {len(self.repos)} specified repositories")
+            return self.repos
+
         log_info(f"Listing repositories in {self.org}...")
 
         repos = []
@@ -134,59 +139,103 @@ class BranchDiscovery:
         log_info(f"Found {len(repos)} repositories")
         return repos
 
-    async def get_repo_branches(self, repo: str, index: int, total: int) -> Optional[RepoWithBranches]:
+    async def get_repo_branches(self, repo: str, index: int, total: int, retry: int = 0) -> Optional[RepoWithBranches]:
         """Get active branches for a repository."""
         async with self.semaphore:
             log_progress(index, total, f"Discovering branches: {repo}")
 
             try:
                 # Get default branch
+                api_endpoint = f'repos/{repo}'
+                log_debug(f"API call: gh api {api_endpoint}")
                 proc = await asyncio.create_subprocess_exec(
                     'gh', 'api',
-                    f'repos/{repo}',
+                    api_endpoint,
                     '--jq', '.default_branch',
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                stdout, _ = await proc.communicate()
-                default_branch = stdout.decode().strip() if proc.returncode == 0 else 'main'
+                stdout, stderr_default = await proc.communicate()
+
+                if proc.returncode != 0:
+                    error_msg = stderr_default.decode().strip()
+                    log_debug(f"API error for '{api_endpoint}': {error_msg}")
+                    if "404" in error_msg or "Not Found" in error_msg:
+                        # Retry once for 404s as they might be transient
+                        if retry < 1:
+                            log_debug(f"Got 404 for {repo}, retrying...")
+                            await asyncio.sleep(1)  # Brief delay before retry
+                            return await self.get_repo_branches(repo, index, total, retry + 1)
+                        log_warn(f"Repository not found or inaccessible: {repo} (API: {api_endpoint})")
+                    else:
+                        log_warn(f"Error accessing {repo}: {error_msg}")
+                    return None
+
+                default_branch = stdout.decode().strip() or 'main'
+                log_debug(f"Default branch for {repo}: {default_branch}")
 
                 # Get all branches with their last commit date
+                # Note: We fetch without --paginate to avoid 404 race conditions in concurrent execution
+                # Note: Some repos reject per_page parameter, so we fetch without it (default is 30, max 100)
+                branches_endpoint = f'repos/{repo}/branches?per_page=100'
+                log_debug(f"API call: gh api {branches_endpoint}")
                 proc = await asyncio.create_subprocess_exec(
                     'gh', 'api',
-                    f'repos/{repo}/branches',
-                    '--field', 'per_page=100',
-                    '--paginate',
-                    '--jq', '.[] | {name: .name, sha: .commit.sha}',
+                    branches_endpoint,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
                 stdout, stderr = await proc.communicate()
 
                 if proc.returncode != 0:
-                    log_debug(f"Error getting branches for {repo}: {stderr.decode()}")
+                    error_msg = stderr.decode().strip()
+                    log_debug(f"API error for '{branches_endpoint}': {error_msg}")
+                    if "404" in error_msg or "Not Found" in error_msg:
+                        # Retry once for 404s as they might be transient
+                        if retry < 1:
+                            log_debug(f"Got 404 for {repo} branches, retrying...")
+                            await asyncio.sleep(2)  # Longer delay before retry
+                            return await self.get_repo_branches(repo, index, total, retry + 1)
+                        log_warn(f"Branches not found for {repo} (may be empty or inaccessible) (API: {branches_endpoint})")
+                    elif "rate limit" in error_msg.lower():
+                        log_warn(f"Rate limited while fetching branches for {repo}. Consider reducing concurrency.")
+                    else:
+                        log_warn(f"Error getting branches for {repo}: {error_msg}")
                     return None
 
-                branches_output = stdout.decode().strip()
-                if not branches_output:
+                # Parse the JSON array response
+                try:
+                    branches_data = json.loads(stdout.decode().strip())
+                    if not isinstance(branches_data, list):
+                        log_debug(f"Unexpected response format for {repo}/branches")
+                        return None
+                except json.JSONDecodeError:
+                    log_debug(f"Failed to parse branches response for {repo}")
+                    return None
+
+                if not branches_data:
+                    log_debug(f"No branches found in {repo}")
                     return None
 
                 active_branches = []
-                for line in branches_output.split('\n'):
-                    if not line:
+                for branch_item in branches_data:
+                    if not isinstance(branch_item, dict):
                         continue
-                    try:
-                        branch_data = json.loads(line)
-                        # Get commit date for this branch
-                        commit_date = await self._get_commit_date(repo, branch_data['sha'])
-                        if commit_date and commit_date >= self.cutoff_date:
-                            active_branches.append(BranchInfo(
-                                name=branch_data['name'],
-                                last_commit_date=commit_date.isoformat(),
-                                sha=branch_data['sha']
-                            ))
-                    except json.JSONDecodeError:
+
+                    branch_name = branch_item.get('name')
+                    branch_sha = branch_item.get('commit', {}).get('sha')
+
+                    if not branch_name or not branch_sha:
                         continue
+
+                    # Get commit date for this branch
+                    commit_date = await self._get_commit_date(repo, branch_sha)
+                    if commit_date and commit_date >= self.cutoff_date:
+                        active_branches.append(BranchInfo(
+                            name=branch_name,
+                            last_commit_date=commit_date.isoformat(),
+                            sha=branch_sha
+                        ))
 
                 if not active_branches:
                     log_debug(f"No active branches in {repo}")

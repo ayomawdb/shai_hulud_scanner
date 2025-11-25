@@ -40,5 +40,6 @@ htmlcov/
 scan-results.json
 *.log
 
+output-wso2/
 outputs/
 orgs.txt
