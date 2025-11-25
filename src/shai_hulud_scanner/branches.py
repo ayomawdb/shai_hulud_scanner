@@ -174,55 +174,68 @@ class BranchDiscovery:
                 default_branch = stdout.decode().strip() or 'main'
                 log_debug(f"Default branch for {repo}: {default_branch}")
 
-                # Get branches and filter by age
-                # Note: We only fetch the first page (100 branches) to avoid excessive API calls
-                # Most active branches will be in the first 100 results
-                branches_endpoint = f'repos/{repo}/branches?per_page=100'
-                log_debug(f"API call: gh api {branches_endpoint}")
-                proc = await asyncio.create_subprocess_exec(
-                    'gh', 'api',
-                    branches_endpoint,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await proc.communicate()
+                # Get all branches with pagination
+                all_branches_data = []
+                page = 1
+                per_page = 100
 
-                if proc.returncode != 0:
-                    error_msg = stderr.decode().strip()
-                    log_debug(f"API error for '{branches_endpoint}': {error_msg}")
-                    if "404" in error_msg or "Not Found" in error_msg:
-                        # Retry once for 404s as they might be transient
-                        if retry < 1:
-                            log_debug(f"Got 404 for {repo} branches, retrying...")
-                            await asyncio.sleep(2)  # Longer delay before retry
-                            return await self.get_repo_branches(repo, index, total, retry + 1)
-                        log_warn(f"Branches not found for {repo} (may be empty or inaccessible) (API: {branches_endpoint})")
-                    elif "rate limit" in error_msg.lower():
-                        log_warn(f"Rate limited while fetching branches for {repo}. Consider reducing concurrency.")
-                    else:
-                        log_warn(f"Error getting branches for {repo}: {error_msg}")
-                    return None
+                while True:
+                    branches_endpoint = f'repos/{repo}/branches?per_page={per_page}&page={page}'
+                    log_debug(f"API call: gh api {branches_endpoint}")
+                    proc = await asyncio.create_subprocess_exec(
+                        'gh', 'api',
+                        branches_endpoint,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await proc.communicate()
 
-                # Parse the JSON array response
-                try:
-                    all_branches_data = json.loads(stdout.decode().strip())
-                    if not isinstance(all_branches_data, list):
-                        log_debug(f"Unexpected response format for {repo}/branches")
+                    if proc.returncode != 0:
+                        error_msg = stderr.decode().strip()
+                        log_debug(f"API error for '{branches_endpoint}': {error_msg}")
+                        if "404" in error_msg or "Not Found" in error_msg:
+                            # Retry once for 404s as they might be transient
+                            if retry < 1:
+                                log_debug(f"Got 404 for {repo} branches, retrying...")
+                                await asyncio.sleep(2)  # Longer delay before retry
+                                return await self.get_repo_branches(repo, index, total, retry + 1)
+                            log_warn(f"Branches not found for {repo} (may be empty or inaccessible) (API: {branches_endpoint})")
+                        elif "rate limit" in error_msg.lower():
+                            log_warn(f"Rate limited while fetching branches for {repo}. Consider reducing concurrency.")
+                        else:
+                            log_warn(f"Error getting branches for {repo}: {error_msg}")
                         return None
-                except json.JSONDecodeError:
-                    log_debug(f"Failed to parse branches response for {repo}")
-                    return None
+
+                    # Parse the JSON array response
+                    try:
+                        branches_data = json.loads(stdout.decode().strip())
+                        if not isinstance(branches_data, list):
+                            log_debug(f"Unexpected response format for {repo}/branches")
+                            return None
+                    except json.JSONDecodeError:
+                        log_debug(f"Failed to parse branches response for {repo}")
+                        return None
+
+                    if not branches_data:
+                        break
+
+                    all_branches_data.extend(branches_data)
+                    log_debug(f"Fetched page {page}: {len(branches_data)} branches (total so far: {len(all_branches_data)})")
+
+                    # If we got less than per_page, we're on the last page
+                    if len(branches_data) < per_page:
+                        break
+
+                    page += 1
 
                 if not all_branches_data:
                     log_debug(f"No branches found in {repo}")
                     return None
 
-                log_debug(f"Found {len(all_branches_data)} branches in {repo}")
+                log_debug(f"Found {len(all_branches_data)} total branches in {repo}")
 
                 # Filter branches by age
-                # We check commit dates to filter, but stop early if we find many old branches in a row
                 active_branches = []
-                consecutive_old = 0
                 checked_count = 0
 
                 for branch_item in all_branches_data:
@@ -250,15 +263,14 @@ class BranchDiscovery:
                             last_commit_date=commit_date.isoformat(),
                             sha=branch_sha
                         ))
-                        consecutive_old = 0  # Reset counter on finding active branch
                     else:
                         log_debug(f"Skipping old branch {repo}:{branch_name} (last commit: {commit_date.date()})")
 
                 if not active_branches:
-                    log_debug(f"No valid branches in {repo}")
+                    log_debug(f"No active branches in {repo} (checked {checked_count} branches)")
                     return None
 
-                log_debug(f"Including {len(active_branches)} branches from {repo}")
+                log_debug(f"Including {len(active_branches)} active branches from {repo} (checked {checked_count}/{len(all_branches_data)} total branches)")
 
                 return RepoWithBranches(
                     repository=repo,
