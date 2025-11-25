@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,18 @@ from .output import log_info, log_error, log_warn, print_header, print_summary, 
 from .scanner import GitHubScanner
 from .branches import BranchDiscovery, save_branches, load_branches
 from .branch_scanner import BranchScanner
+
+
+# Default paths relative to package root
+LISTS_DIR = "lists"
+OUTPUTS_DIR = "outputs"
+
+
+def get_package_root() -> Path:
+    """Get the root directory of the package (where lists/ and outputs/ are)."""
+    # This file is at src/shai_hulud_scanner/cli.py
+    # Package root is 3 levels up
+    return Path(__file__).parent.parent.parent
 
 
 def check_prerequisites():
@@ -44,7 +57,6 @@ def parse_library_line(line: str) -> Optional[tuple[str, str]]:
         return None
 
     # Find the last hyphen followed by a digit (version separator)
-    # We need to find where the version starts
     last_hyphen = -1
     for i in range(len(line) - 1, -1, -1):
         if line[i] == '-' and i + 1 < len(line) and line[i + 1].isdigit():
@@ -63,11 +75,11 @@ def parse_library_line(line: str) -> Optional[tuple[str, str]]:
     return (lib_name, lib_version)
 
 
-def load_libraries(file_path: str) -> list[tuple[str, str]]:
+def load_libraries_from_file(file_path: str) -> set[tuple[str, str]]:
     """
-    Load libraries from file.
+    Load libraries from a single file.
     Supports format: package-name-version (one per line)
-    Automatically deduplicates and sorts the list.
+    Returns a set for deduplication.
     """
     libraries_set: set[tuple[str, str]] = set()
 
@@ -77,10 +89,43 @@ def load_libraries(file_path: str) -> list[tuple[str, str]]:
             if parsed:
                 libraries_set.add(parsed)
 
+    return libraries_set
+
+
+def load_libraries_from_directory(lists_dir: Path) -> list[tuple[str, str]]:
+    """
+    Load libraries from all .txt files in a directory.
+    Automatically deduplicates and sorts the list.
+    """
+    libraries_set: set[tuple[str, str]] = set()
+
+    txt_files = sorted(lists_dir.glob('*.txt'))
+    if not txt_files:
+        return []
+
+    log_info(f"Loading libraries from {lists_dir}")
+    for txt_file in txt_files:
+        file_libs = load_libraries_from_file(str(txt_file))
+        log_info(f"  - {txt_file.name}: {len(file_libs)} entries")
+        libraries_set.update(file_libs)
+
     # Sort by library name, then by version
     libraries = sorted(libraries_set, key=lambda x: (x[0].lower(), x[1]))
 
     return libraries
+
+
+def write_combined_list(libraries: list[tuple[str, str]], output_path: str):
+    """
+    Write the combined, deduplicated, sorted list of libraries to a file.
+    """
+    with open(output_path, 'w') as f:
+        f.write(f"# Combined compromised libraries list\n")
+        f.write(f"# Generated: {datetime.now(timezone.utc).isoformat()}\n")
+        f.write(f"# Total unique entries: {len(libraries)}\n")
+        f.write("#\n")
+        for lib_name, lib_version in libraries:
+            f.write(f"{lib_name}-{lib_version}\n")
 
 
 def write_output(output_file: str, scanner: GitHubScanner, libraries_count: int):
@@ -101,6 +146,18 @@ def write_output(output_file: str, scanner: GitHubScanner, libraries_count: int)
     return report
 
 
+def get_output_paths(outputs_dir: Path, org: str) -> dict:
+    """Get all output file paths for a scan."""
+    base = outputs_dir / org
+    return {
+        'results': f"{base}.json",
+        'findings': f"{base}.findings.json",
+        'libraries': f"{base}.libraries.txt",
+        'state': f"{base}.json.state",
+        'branches': f"{base}.branches.json",
+    }
+
+
 async def async_main(args: argparse.Namespace) -> int:
     """Async entry point."""
     if args.debug:
@@ -108,28 +165,47 @@ async def async_main(args: argparse.Namespace) -> int:
 
     check_prerequisites()
 
-    if not Path(args.file).exists():
-        log_error(f"Input file not found: {args.file}")
+    # Determine paths
+    pkg_root = get_package_root()
+    lists_dir = pkg_root / LISTS_DIR
+    outputs_dir = pkg_root / OUTPUTS_DIR
+
+    # Ensure outputs directory exists
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check lists directory exists
+    if not lists_dir.exists():
+        log_error(f"Lists directory not found: {lists_dir}")
         return 1
 
-    libraries = load_libraries(args.file)
+    # Load libraries from lists directory
+    libraries = load_libraries_from_directory(lists_dir)
     if not libraries:
-        log_error("No libraries found in input file")
+        log_error("No libraries found in lists/ directory")
         return 1
 
     log_info(f"Loaded {len(libraries)} unique libraries (deduplicated and sorted)")
 
+    # Get output paths
+    paths = get_output_paths(outputs_dir, args.org)
+    output_file = paths['results']
+
+    # Write combined list to file for reference
+    write_combined_list(libraries, paths['libraries'])
+    log_info(f"Combined library list written to: {paths['libraries']}")
+
     # Branch scanning mode
     if args.scan_branches:
-        return await run_branch_scan(args, libraries)
+        return await run_branch_scan(args, libraries, paths)
 
     # Default: code search mode
-    return await run_code_search_scan(args, libraries)
+    return await run_code_search_scan(args, libraries, paths)
 
 
-async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, str]]) -> int:
+async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, str]], paths: dict) -> int:
     """Run branch-based scanning."""
-    branches_file = args.branches_file or f"{args.output}.branches.json"
+    branches_file = paths['branches']
+    output_file = paths['results']
 
     # Phase 1: Discover branches (or load from file)
     discovery = None
@@ -157,7 +233,7 @@ async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, s
     scanner = BranchScanner(
         args.org,
         args.concurrency,
-        output_file=args.output
+        output_file=output_file
     )
 
     # Check for existing state to resume
@@ -177,7 +253,7 @@ async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, s
                 if scanner.results:
                     scanner._write_output(discovery.total_branches)
 
-    print_header_branches(args.org, len(libraries), discovery.total_branches, args.concurrency, args.output)
+    print_header_branches(args.org, len(libraries), discovery.total_branches, args.concurrency, output_file)
 
     if resumed and scanner.scan_state:
         print(f"  Resuming from: {scanner.scan_state.started_at}", file=sys.stderr)
@@ -191,7 +267,7 @@ async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, s
         scanner._write_output(discovery.total_branches)
         scanner.clear_state()
 
-        log_info(f"Results written to: {args.output}")
+        log_info(f"Results written to: {output_file}")
 
         # Print summary
         print_summary_branches(scanner, discovery.total_branches)
@@ -206,12 +282,14 @@ async def run_branch_scan(args: argparse.Namespace, libraries: list[tuple[str, s
     return 0
 
 
-async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[str, str]]) -> int:
+async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[str, str]], paths: dict) -> int:
     """Run code search based scanning (default mode)."""
+    output_file = paths['results']
+
     scanner = GitHubScanner(
         args.org,
         args.concurrency,
-        output_file=args.output
+        output_file=output_file
     )
 
     # Check for existing state to resume
@@ -230,9 +308,9 @@ async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[s
                 log_info(f"Found {len(state.detections)} detections so far")
                 # Write output file immediately with existing detections
                 if scanner.results:
-                    write_output(args.output, scanner, len(libraries))
+                    write_output(output_file, scanner, len(libraries))
 
-    print_header(args.org, len(libraries), args.concurrency, args.output)
+    print_header(args.org, len(libraries), args.concurrency, output_file)
 
     if resumed and scanner.scan_state:
         print(f"  Resuming from: {scanner.scan_state.started_at}", file=sys.stderr)
@@ -243,7 +321,7 @@ async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[s
 
         log_info("Scan complete. Generating report...")
 
-        report = write_output(args.output, scanner, len(libraries))
+        report = write_output(output_file, scanner, len(libraries))
 
         # Write detailed findings file
         scanner._write_findings()
@@ -252,7 +330,7 @@ async def run_code_search_scan(args: argparse.Namespace, libraries: list[tuple[s
         # Clear state file on successful completion
         scanner.clear_state()
 
-        log_info(f"Results written to: {args.output}")
+        log_info(f"Results written to: {output_file}")
         log_info(f"Detailed findings written to: {findings_file}")
         print_summary(report, scanner.detection_count)
 
@@ -309,7 +387,7 @@ def print_summary_branches(scanner: BranchScanner, total_branches: int):
         print(f"{Colors.BOLD}Affected Repositories:{Colors.NC}")
         for repo in affected_repos:
             lib_count = len(repo.affected_libraries)
-            print(f"  ⚠️  {repo.repository} - {lib_count} compromised package(s)")
+            print(f"  {repo.repository} - {lib_count} compromised package(s)")
 
     print("")
 
@@ -326,20 +404,10 @@ def main() -> int:
         help='GitHub organization to scan'
     )
     parser.add_argument(
-        '-f', '--file',
-        required=True,
-        help='CSV file with compromised libraries (name,version)'
-    )
-    parser.add_argument(
         '-c', '--concurrency',
         type=int,
         default=10,
         help='Number of parallel searches (default: 10)'
-    )
-    parser.add_argument(
-        '-o', '--output',
-        default='scan-results.json',
-        help='Output file for results (default: scan-results.json)'
     )
     parser.add_argument(
         '-d', '--debug',
@@ -361,10 +429,6 @@ def main() -> int:
         type=int,
         default=30,
         help='Only scan branches with commits in last N days (default: 30)'
-    )
-    parser.add_argument(
-        '--branches-file',
-        help='JSON file to save/load discovered branches (default: <output>.branches.json)'
     )
 
     args = parser.parse_args()

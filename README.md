@@ -15,14 +15,13 @@ pip install -e .
 
 ## Usage
 
-**Installed:**
 ```bash
-shai-hulud-scanner -g <github-org> -f <libraries.csv> [-c <concurrency>] [-o <output>]
+shai-hulud-scanner -g <github-org> [-c <concurrency>] [-d] [--fresh] [--scan-branches]
 ```
 
 **From source (no install):**
 ```bash
-PYTHONPATH=src python -m shai_hulud_scanner -g <github-org> -f <libraries.csv>
+PYTHONPATH=src python -m shai_hulud_scanner -g <github-org>
 ```
 
 ### Options
@@ -30,18 +29,42 @@ PYTHONPATH=src python -m shai_hulud_scanner -g <github-org> -f <libraries.csv>
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-g, --org` | GitHub organization to scan | Required |
-| `-f, --file` | CSV file with compromised libraries | Required |
 | `-c, --concurrency` | Number of parallel searches | 10 |
-| `-o, --output` | Output JSON file | scan-results.json |
 | `-d, --debug` | Show matched lines in output | Off |
 | `--fresh` | Start fresh, ignore saved state | Off |
 | `--scan-branches` | Scan all active branches (not just default) | Off |
 | `--branch-age` | Only scan branches with commits in last N days | 30 |
-| `--branches-file` | JSON file to save/load discovered branches | `<output>.branches.json` |
 
-### Input File Format
+### Example
 
-The input file should contain one library per line in the format `package-name-version`:
+```bash
+# Scan an organization
+shai-hulud-scanner -g my-org
+
+# Scan with higher concurrency
+shai-hulud-scanner -g my-org -c 20
+
+# Scan all active branches
+shai-hulud-scanner -g my-org --scan-branches
+```
+
+## Directory Structure
+
+```
+shai-hulud-scanner/
+├── lists/              # Input: compromised library lists (.txt files)
+│   ├── wiz_list.txt
+│   └── semgrep_list.txt
+├── outputs/            # Output: scan results (auto-generated)
+│   ├── <org>.json
+│   ├── <org>.findings.json
+│   └── <org>.libraries.txt
+└── src/
+```
+
+### Input Format (lists/*.txt)
+
+Each `.txt` file in `lists/` contains one library per line in format `package-name-version`:
 
 ```
 # Comments start with #
@@ -51,76 +74,55 @@ ua-parser-js-0.7.29
 ```
 
 The scanner automatically:
-- Deduplicates entries
+- Loads all `.txt` files from `lists/`
+- Deduplicates entries across all files
 - Sorts libraries alphabetically
-
-### Example
-
-```bash
-shai-hulud-scanner -g my-org -f compromised.txt -c 20 -o results.json
-```
-
-## Output
-
-Results stream in real-time as detections are found:
-
-```
-════════════════════════════════════════════════════════════
-  SHAI-HULUD SCANNER
-════════════════════════════════════════════════════════════
-  Organization:    my-org
-  Libraries:       9
-  Concurrency:     10
-  Output:          scan-results.json
-════════════════════════════════════════════════════════════
-
-[SCAN] (1/9)  11.1% | Scanning: event-stream@3.3.6
-[🚨 DETECTION] event-stream@3.3.6
-           Repository: my-org/web-app
-           File:       package-lock.json
-           URL:        https://github.com/...
-```
-
-JSON output is saved to the specified file with full details.
 
 ## Output Files
 
-The scanner produces two output files:
+All outputs are written to `outputs/<org>.*`:
 
-1. **`<output>.json`** - Compromised package detections (exact version matches)
-2. **`<output>.findings.json`** - Detailed findings including all library occurrences
+| File | Description |
+|------|-------------|
+| `<org>.json` | Compromised package detections (exact version matches) |
+| `<org>.findings.json` | Detailed findings including all library occurrences |
+| `<org>.libraries.txt` | Combined, deduplicated, sorted list of libraries scanned |
 
-The findings file captures every repository where a searched library was found, even if the version doesn't match. This helps with:
-- Understanding library usage across the organization
-- Identifying repos that may need updates
-- Future analysis if new vulnerable versions are discovered
+### Findings File
 
-Example findings entry:
+The findings file captures every repository where a searched library was found, even if the version doesn't match:
+
 ```json
 {
   "repository": "my-org/web-app",
   "file": "package-lock.json",
-  "url": "https://github.com/...",
+  "url": "https://github.com/.../package-lock.json#L42",
   "searched_library": "event-stream",
   "searched_version": "3.3.6",
   "found_version": "4.0.1",
-  "is_match": false
+  "is_match": false,
+  "line_number": 42
 }
 ```
 
+This helps with:
+- Understanding library usage across the organization
+- Identifying repos that may need updates
+- Future analysis if new vulnerable versions are discovered
+
 ## Resume Support
 
-Scans can be interrupted (Ctrl+C) and resumed later. Progress is saved to `<output>.state`:
+Scans can be interrupted (Ctrl+C) and resumed later. Progress is saved to `outputs/<org>.json.state`:
 
 ```bash
 # Start a scan
-shai-hulud-scanner -g my-org -f compromised.csv -o results.json
+shai-hulud-scanner -g my-org
 
 # If interrupted, run the same command to resume
-shai-hulud-scanner -g my-org -f compromised.csv -o results.json
+shai-hulud-scanner -g my-org
 
 # To start fresh, ignoring saved state
-shai-hulud-scanner -g my-org -f compromised.csv -o results.json --fresh
+shai-hulud-scanner -g my-org --fresh
 ```
 
 ## Branch Scanning Mode
@@ -129,19 +131,33 @@ By default, the scanner uses GitHub's Code Search API which only searches the de
 
 ```bash
 # Scan all branches with commits in the last 30 days
-shai-hulud-scanner -g my-org -f compromised.csv --scan-branches
+shai-hulud-scanner -g my-org --scan-branches
 
 # Scan branches with commits in the last 7 days
-shai-hulud-scanner -g my-org -f compromised.csv --scan-branches --branch-age 7
-
-# Use a specific branches file
-shai-hulud-scanner -g my-org -f compromised.csv --scan-branches --branches-file branches.json
+shai-hulud-scanner -g my-org --scan-branches --branch-age 7
 ```
 
 Branch scanning works in two phases:
-1. **Discovery**: Lists all repos and their active branches, saves to `<output>.branches.json`
+1. **Discovery**: Lists all repos and their active branches, saves to `outputs/<org>.branches.json`
 2. **Scanning**: Fetches `package.json` and `package-lock.json` from each branch and checks for compromised packages
 
-The branches file can be reused across runs (unless `--fresh` is specified), saving API calls.
-
 **Note**: Branch scanning makes more API calls than code search mode and is slower, but provides complete coverage across all active branches.
+
+## Sample Output
+
+```
+════════════════════════════════════════════════════════════
+  SHAI-HULUD SCANNER
+════════════════════════════════════════════════════════════
+  Organization:    my-org
+  Libraries:       1234
+  Concurrency:     10
+  Output:          outputs/my-org.json
+════════════════════════════════════════════════════════════
+
+[SCAN] (1/1234)   0.1% | Scanning: event-stream@3.3.6
+[🚨 DETECTION] event-stream@3.3.6
+           Repository: my-org/web-app
+           File:       package-lock.json
+           URL:        https://github.com/.../package-lock.json#L42
+```
