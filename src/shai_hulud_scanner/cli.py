@@ -665,7 +665,9 @@ async def run_local_scan(
 
     if not cache or args.refresh_cache:
         log_info("Fetching package files from repositories...")
-        fetcher = PackageFetcher(org_name, args.concurrency, repos)
+        # Use repo_age parameter (0 means scan all repos regardless of age)
+        max_repo_age = args.repo_age if args.repo_age > 0 else 36500  # ~100 years = effectively no limit
+        fetcher = PackageFetcher(org_name, args.concurrency, repos, max_repo_age)
         cache = await fetcher.fetch_all()
         save_cache(cache, cache_file)
 
@@ -807,6 +809,12 @@ def main() -> int:
         type=int,
         default=30,
         help='Only scan branches with commits in last N days (default: 30)'
+    )
+    parser.add_argument(
+        '--repo-age',
+        type=int,
+        default=30,
+        help='Only scan repositories updated in last N days (default: 30, 0=scan all)'
     )
     parser.add_argument(
         '--use-search-api',

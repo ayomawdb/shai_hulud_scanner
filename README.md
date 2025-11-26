@@ -36,6 +36,7 @@ PYTHONPATH=src python -m shai_hulud_scanner -g <github-org>
 | `--fresh` | Start fresh, ignore saved state | Off |
 | `--scan-branches` | Scan all active branches (not just default) | Off |
 | `--branch-age` | Only scan branches with commits in last N days | 30 |
+| `--repo-age` | Only scan repos updated in last N days (0=all) | 30 |
 | `--use-search-api` | Use legacy GitHub Code Search API (slower) | Off |
 | `--refresh-cache` | Refresh package file cache (local scan mode) | Off |
 
@@ -64,6 +65,12 @@ shai-hulud-scanner -g my-org -c 20
 
 # Scan all active branches
 shai-hulud-scanner -g my-org --scan-branches
+
+# Scan only repositories updated in the last 7 days (faster)
+shai-hulud-scanner -g my-org --repo-age 7
+
+# Scan all repositories regardless of age
+shai-hulud-scanner -g my-org --repo-age 0
 
 # Refresh the package cache and re-scan
 shai-hulud-scanner -g my-org --refresh-cache

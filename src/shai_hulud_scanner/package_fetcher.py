@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -28,12 +28,15 @@ class PackageFetcher:
         self,
         org: str,
         concurrency: int = 10,
-        repos: Optional[list[str]] = None
+        repos: Optional[list[str]] = None,
+        max_repo_age_days: int = 30
     ):
         self.org = org
         self.concurrency = concurrency
         self.semaphore = asyncio.Semaphore(concurrency)
         self.repos = repos  # Optional list of specific repos to scan
+        self.max_repo_age_days = max_repo_age_days
+        self.repo_age_cutoff = datetime.now(timezone.utc) - timedelta(days=max_repo_age_days)
 
     async def list_repos(self) -> list[str]:
         """List all repositories in the organization."""
@@ -82,6 +85,45 @@ class PackageFetcher:
 
         log_info(f"Found {len(repos)} repositories")
         return repos
+
+    async def _should_skip_repo(self, repo: str) -> bool:
+        """
+        Check if repository should be skipped based on last update time.
+        Returns True if repo is too old, False if it should be scanned.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'gh', 'api',
+                f'repos/{repo}',
+                '--jq', '.pushed_at',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode != 0:
+                # If we can't get the info, don't skip (safer to scan)
+                return False
+
+            pushed_at_str = stdout.decode().strip()
+            if not pushed_at_str:
+                return False
+
+            # Parse the timestamp
+            pushed_at = datetime.fromisoformat(pushed_at_str.replace('Z', '+00:00'))
+
+            # Skip if last push is older than cutoff
+            if pushed_at < self.repo_age_cutoff:
+                log_debug(f"  Skipping {repo}: last updated {pushed_at.date()} (older than {self.max_repo_age_days} days)")
+                return True
+
+            log_debug(f"  Including {repo}: last updated {pushed_at.date()}")
+            return False
+
+        except Exception as e:
+            log_debug(f"Error checking repo age for {repo}: {e}")
+            # If error, don't skip (safer to scan)
+            return False
 
     async def _find_package_files(self, repo: str) -> list[str]:
         """
@@ -188,9 +230,11 @@ class PackageFetcher:
         Returns a dict mapping package name to version.
         """
         dependencies: dict[str, str] = {}
+        log_debug(f"    _extract_dependencies: Processing {file_path}")
 
         # Handle pnpm-lock.yaml
         if 'pnpm-lock' in file_path:
+            log_debug(f"    Detected pnpm-lock.yaml format")
             if yaml is None:
                 raise ImportError(
                     "PyYAML is required to parse pnpm-lock.yaml files. "
@@ -245,14 +289,22 @@ class PackageFetcher:
             return dependencies
 
         # Handle JSON files (package.json and package-lock.json)
+        log_debug(f"    Detected JSON format (package.json or package-lock.json)")
         try:
             pkg_data = json.loads(content)
-        except json.JSONDecodeError:
+            log_debug(f"    Successfully parsed JSON")
+        except json.JSONDecodeError as e:
+            log_debug(f"    JSON parse error: {e}")
             return {}
 
         if 'package-lock' in file_path:
+            log_debug(f"    Processing package-lock.json format")
             # package-lock.json v2/v3 format (packages key)
             if 'packages' in pkg_data:
+                log_debug(f"    Found 'packages' key (v2/v3 format)")
+                packages_count = len(pkg_data.get('packages', {}))
+                log_debug(f"    Total packages entries: {packages_count}")
+
                 for pkg_path, pkg_info in pkg_data.get('packages', {}).items():
                     if isinstance(pkg_info, dict):
                         name = pkg_info.get('name')
@@ -267,19 +319,34 @@ class PackageFetcher:
                                 name = parts[-1]
                                 dependencies[name] = version
 
+                log_debug(f"    Extracted {len(dependencies)} dependencies from packages key")
+
             # package-lock.json v1 format (dependencies key with nested structure)
             if 'dependencies' in pkg_data:
+                log_debug(f"    Found 'dependencies' key (v1 format)")
+                deps_before = len(dependencies)
                 self._extract_v1_dependencies(pkg_data['dependencies'], dependencies)
+                log_debug(f"    Extracted {len(dependencies) - deps_before} additional dependencies from v1 format")
+
+            log_debug(f"    Total dependencies from package-lock.json: {len(dependencies)}")
 
         else:
             # package.json format
+            log_debug(f"    Processing package.json format")
             for dep_type in ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']:
                 deps = pkg_data.get(dep_type, {})
                 if isinstance(deps, dict):
+                    deps_count = 0
                     for name, version in deps.items():
                         if isinstance(version, str):
                             dependencies[name] = version
+                            deps_count += 1
+                    if deps_count > 0:
+                        log_debug(f"    Found {deps_count} {dep_type}")
 
+            log_debug(f"    Total dependencies from package.json: {len(dependencies)}")
+
+        log_debug(f"    Returning {len(dependencies)} total dependencies")
         return dependencies
 
     def _extract_v1_dependencies(self, deps: dict, result: dict[str, str]):
@@ -300,19 +367,29 @@ class PackageFetcher:
         async with self.semaphore:
             log_progress(index, total, f"Fetching: {repo}")
 
+            # Check if repo should be skipped based on age
+            if await self._should_skip_repo(repo):
+                return []
+
             # First, try to find all package files in the repo (including subdirectories)
             package_file_paths = await self._find_package_files(repo)
 
             # If search API found nothing, fall back to checking root directory
             if not package_file_paths:
+                log_debug(f"  No package files found via tree API, checking root directory")
                 package_file_paths = self.PACKAGE_FILES
+            else:
+                log_debug(f"  Package files to fetch: {package_file_paths}")
 
             files = []
             for file_path in package_file_paths:
+                log_debug(f"  Fetching: {file_path}")
                 result = await self._fetch_file_content(repo, file_path)
                 if result:
                     content, html_url = result
+                    log_debug(f"  Successfully fetched {file_path} ({len(content)} bytes)")
                     dependencies = self._extract_dependencies(content, file_path)
+                    log_debug(f"  Extracted {len(dependencies)} dependencies from {file_path}")
 
                     if dependencies:  # Only include if there are dependencies
                         files.append(PackageFileInfo(
@@ -322,7 +399,11 @@ class PackageFetcher:
                             dependencies=dependencies,
                             raw_content=content,
                         ))
-                        log_debug(f"  Found {file_path} with {len(dependencies)} dependencies")
+                        log_debug(f"  ✓ Added {file_path} with {len(dependencies)} dependencies")
+                    else:
+                        log_debug(f"  ✗ Skipping {file_path} - no dependencies found")
+                else:
+                    log_debug(f"  ✗ Failed to fetch {file_path}")
 
             # Small delay to avoid rate limiting
             await asyncio.sleep(0.1)
@@ -344,7 +425,10 @@ class PackageFetcher:
                 files=[],
             )
 
-        log_info(f"Fetching package files from {len(repos)} repositories...")
+        if self.max_repo_age_days > 0:
+            log_info(f"Fetching package files from {len(repos)} repositories (filtering repos older than {self.max_repo_age_days} days)...")
+        else:
+            log_info(f"Fetching package files from {len(repos)} repositories...")
 
         # Fetch all repos concurrently with semaphore limiting
         tasks = [
@@ -353,11 +437,19 @@ class PackageFetcher:
         ]
         results = await asyncio.gather(*tasks)
 
-        # Flatten results
+        # Flatten results and count skipped repos
         all_files: list[PackageFileInfo] = []
         repos_with_packages = 0
+        repos_scanned = 0
+        repos_skipped = 0
+
         for repo_files in results:
-            if repo_files:
+            if repo_files is None:
+                continue
+            if len(repo_files) == 0:
+                repos_skipped += 1
+            else:
+                repos_scanned += 1
                 repos_with_packages += 1
                 all_files.extend(repo_files)
 
@@ -371,6 +463,8 @@ class PackageFetcher:
         )
 
         log_info(f"Fetched {len(all_files)} package files from {repos_with_packages} repositories")
+        if self.max_repo_age_days > 0:
+            log_info(f"Skipped {repos_skipped} repositories (not updated in last {self.max_repo_age_days} days)")
 
         return cache
 
