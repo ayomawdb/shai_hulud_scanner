@@ -2,6 +2,24 @@
 
 Scan GitHub organizations for compromised npm packages in `package.json`, `package-lock.json`, and `pnpm-lock.yaml` files.
 
+## Quick Start
+
+```bash
+# 1. Install dependencies
+pip install pyyaml
+
+# 2. Authenticate with GitHub CLI
+gh auth login
+
+# 3. Create organization file
+echo "my-org" > orgs.txt
+
+# 4. Run scanner
+python3 -m shai_hulud_scanner.cli -g orgs.txt
+
+# Results will be in: outputs/my-org.json
+```
+
 ## Prerequisites
 
 - Python 3.9+
@@ -10,165 +28,188 @@ Scan GitHub organizations for compromised npm packages in `package.json`, `packa
 
 ## Installation
 
+### Option 1: Install as Package
 ```bash
 pip install -e .
 ```
 
+After installation, you can run the scanner from anywhere:
+```bash
+shai-hulud-scanner -g orgs.txt
+```
+
+### Option 2: Run from Source (No Installation)
+
+If you prefer not to install the package, you can run it directly from source:
+
+```bash
+# Install dependencies first
+pip install pyyaml
+
+# Run the scanner as a module
+python3 -m shai_hulud_scanner.cli -g orgs.txt
+```
+
+The working directory should be the repository root (where `lists/` and `outputs/` directories are located).
+
 ## Usage
 
 ```bash
-shai-hulud-scanner -g <github-org> [-c <concurrency>] [-d] [--fresh] [--scan-branches]
-```
-
-**From source (no install):**
-```bash
-
-
-
-python -m shai_hulud_scanner -g <github-org>
+shai-hulud-scanner -g <org-file> [options]
 ```
 
 ### Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-g, --org` | GitHub organization(s) to scan | Required* |
-| `-r, --repos` | Specific repository/repositories to scan | Optional |
-| `-c, --concurrency` | Number of parallel searches | 10 |
-| `-d, --debug` | Show matched lines in output | Off |
+| `-g, --org` | **File** containing GitHub organization names (one per line) | Required* |
+| `-r, --repos` | File containing repository URLs, or comma-separated list | Optional |
+| `-c, --concurrency` | Number of parallel operations | 1 |
+| `-d, --debug` | Enable debug output (show matched lines) | Off |
 | `--fresh` | Start fresh, ignore saved state | Off |
 | `--scan-branches` | Scan all active branches (not just default) | Off |
 | `--branch-age` | Only scan branches with commits in last N days | 30 |
 | `--repo-age` | Only scan repos updated in last N days (0=all) | 30 |
 | `--use-search-api` | Use legacy GitHub Code Search API (slower) | Off |
-| `--refresh-cache` | Refresh package file cache (local scan mode) | Off |
+| `--refresh-cache` | Force refresh of package file cache | Off |
 
 \* Either `--org` or `--repos` is required
+
+**Important:** The `-g` flag now **always requires a file path** (not a direct organization name). See examples below.
 
 ### Examples
 
 ```bash
-# Scan a single organization
-shai-hulud-scanner -g my-org
-
-# Scan multiple organizations (comma-separated)
-shai-hulud-scanner -g org1,org2,org3
-
-# Scan multiple organizations from a file
+# Scan organizations from a file (one org per line)
 shai-hulud-scanner -g orgs.txt
+
+# Scan a single organization (create file with one line)
+echo "my-org" > org.txt
+shai-hulud-scanner -g org.txt
 
 # Scan specific repositories from a file
 shai-hulud-scanner -r repos.txt
 
-# Scan specific repositories (comma-separated)
+# Scan specific repositories (comma-separated, no file needed)
 shai-hulud-scanner -r owner/repo1,owner/repo2
 
 # Scan with higher concurrency
-shai-hulud-scanner -g my-org -c 20
+shai-hulud-scanner -g orgs.txt -c 10
 
-# Scan all active branches
-shai-hulud-scanner -g my-org --scan-branches
+# Scan all active branches (not just default branch)
+shai-hulud-scanner -g orgs.txt --scan-branches
+
+# Scan branches updated in the last 7 days
+shai-hulud-scanner -g orgs.txt --scan-branches --branch-age 7
 
 # Scan only repositories updated in the last 7 days (faster)
-shai-hulud-scanner -g my-org --repo-age 7
+shai-hulud-scanner -g orgs.txt --repo-age 7
 
 # Scan all repositories regardless of age
-shai-hulud-scanner -g my-org --repo-age 0
+shai-hulud-scanner -g orgs.txt --repo-age 0
 
 # Refresh the package cache and re-scan
-shai-hulud-scanner -g my-org --refresh-cache
+shai-hulud-scanner -g orgs.txt --refresh-cache
+
+# Debug mode - show matched lines in output
+shai-hulud-scanner -g orgs.txt -d
 ```
 
-### Multiple Organizations
+### Input Requirements
 
-You can scan multiple organizations in several ways:
+#### Organization File (`-g` flag)
 
-1. **From a text file** (one org per line):
-   ```bash
-   shai-hulud-scanner -g orgs.txt
-   ```
+The `-g` flag **requires a file path**. Create a text file with one organization name per line:
 
-   Example `orgs.txt`:
-   ```
-   # List of organizations to scan
-   my-org
-   another-org
-   third-org
-   ```
+**Example `orgs.txt`:**
+```
+# List of organizations to scan (comments start with #)
+my-org
+another-org
+third-org
+```
 
-2. **Comma-separated list**:
-   ```bash
-   shai-hulud-scanner -g org1,org2,org3
-   ```
+Then run:
+```bash
+shai-hulud-scanner -g orgs.txt
+```
 
-When scanning multiple organizations:
+The tool will log the full path it's reading from:
+```
+[INFO] Reading organization list from: /full/path/to/orgs.txt
+[INFO] Loaded 3 organizations from file
+```
+
+**For a single organization**, create a file with one line:
+```bash
+echo "my-org" > org.txt
+shai-hulud-scanner -g org.txt
+```
+
+**When scanning multiple organizations:**
 - Each org is scanned sequentially
 - Separate output files are generated for each org in `outputs/`
 - The same library list is used for all organizations
 - A final summary shows success/failure for each org
 
-### Specific Repositories
+#### Repository File (`-r` flag)
 
-Instead of scanning an entire organization, you can scan specific repositories:
+The `-r` flag accepts **either a file path OR a comma-separated list**:
 
-1. **From a text file** (one repo per line):
-   ```bash
-   shai-hulud-scanner -r repos.txt
-   ```
+**Option 1: From a text file** (one repo per line):
 
-   Example `repos.txt`:
-   ```
-   # List of repositories to scan
-   owner/repo-name
-   https://github.com/owner/another-repo
-   https://github.com/owner/third-repo.git
-   ```
+**Example `repos.txt`:**
+```
+# List of repositories to scan (comments start with #)
+owner/repo-name
+https://github.com/owner/another-repo
+https://github.com/owner/third-repo.git
+```
 
-2. **Comma-separated list**:
-   ```bash
-   shai-hulud-scanner -r owner/repo1,owner/repo2
-   ```
+```bash
+shai-hulud-scanner -r repos.txt
+```
 
-3. **Limit org scan to specific repos** (combine `-g` and `-r`):
-   ```bash
-   # Scan only specific repos within an organization
-   shai-hulud-scanner -g my-org -r repos.txt
+**Option 2: Comma-separated list** (no file needed):
+```bash
+shai-hulud-scanner -r owner/repo1,owner/repo2
+```
 
-   # Or with comma-separated list
-   shai-hulud-scanner -g my-org -r my-org/repo1,my-org/repo2
-   ```
+**Option 3: Limit org scan to specific repos** (combine `-g` and `-r`):
+```bash
+# Scan only specific repos within an organization
+echo "my-org" > org.txt
+shai-hulud-scanner -g org.txt -r repos.txt
 
-Supported repository formats:
-- `owner/repo` - Direct format
+# Or with comma-separated list
+shai-hulud-scanner -g org.txt -r my-org/repo1,my-org/repo2
+```
+
+**Supported repository formats:**
+- `owner/repo` - Direct format (recommended)
 - `https://github.com/owner/repo` - Full URL
 - `https://github.com/owner/repo.git` - Git URL
 - `github.com/owner/repo` - Short URL
-
-**Branch Scanning**: `--scan-branches` works with both `--org` and `--repos` modes:
-```bash
-# Scan all active branches in specific repositories
-shai-hulud-scanner -r repos.txt --scan-branches
-
-# Scan branches with commits in the last 7 days
-shai-hulud-scanner -r repos.txt --scan-branches --branch-age 7
-
-# Scan specific repos within an org, including branches
-shai-hulud-scanner -g my-org -r repos.txt --scan-branches
-```
 
 ## Directory Structure
 
 ```
 shai-hulud-scanner/
-├── lists/              # Input: compromised library lists (.txt files)
+├── lists/                      # Input: compromised library lists (.txt files)
 │   ├── wiz_list.txt
-│   └── semgrep_list.txt
-├── outputs/            # Output: scan results (auto-generated)
-│   ├── <org>.json
-│   ├── <org>.findings.json
-│   └── <org>.libraries.txt
+│   ├── semgrep_list.txt
+│   └── tenable_semgrep_format.txt
+├── outputs/                    # Output: scan results (auto-generated)
+│   ├── <org>.json             # Main results file
+│   ├── <org>.findings.json    # Detailed findings
+│   ├── <org>.libraries.txt    # Combined library list
+│   ├── <org>.duplicates.txt   # Deduplicated entries
+│   ├── <org>.packages.json    # Package file cache
+│   └── <org>.json.state       # Resume state (if interrupted)
 └── src/
 ```
+
+**Cache files** (`*.packages.json`): Package file cache containing all fetched `package.json`, `package-lock.json`, and `pnpm-lock.yaml` files. Reused on subsequent runs unless `--refresh-cache` is specified.
 
 ### Input Format (lists/*.txt)
 
@@ -205,9 +246,12 @@ All outputs are written to `outputs/<org>.*`:
 
 | File | Description |
 |------|-------------|
-| `<org>.json` | Compromised package detections (exact version matches) |
-| `<org>.findings.json` | Detailed findings including all library occurrences |
-| `<org>.libraries.txt` | Combined, deduplicated, sorted list of libraries scanned |
+| `<org>.json` | Main results: compromised package detections (exact version matches) |
+| `<org>.findings.json` | Detailed findings including all library occurrences (matches and non-matches) |
+| `<org>.libraries.txt` | Combined, deduplicated, sorted list of libraries scanned from all lists/*.txt files |
+| `<org>.duplicates.txt` | List of duplicate entries removed during deduplication |
+| `<org>.packages.json` | Cached package files from repositories (reused on next run) |
+| `<org>.json.state` | Resume state file (created if scan is interrupted) |
 
 ### Findings File
 
@@ -237,32 +281,59 @@ Scans can be interrupted (Ctrl+C) and resumed later. Progress is saved to `outpu
 
 ```bash
 # Start a scan
-shai-hulud-scanner -g my-org
+shai-hulud-scanner -g orgs.txt
 
-# If interrupted, run the same command to resume
-shai-hulud-scanner -g my-org
+# If interrupted (Ctrl+C), run the same command to resume
+shai-hulud-scanner -g orgs.txt
 
 # To start fresh, ignoring saved state
-shai-hulud-scanner -g my-org --fresh
+shai-hulud-scanner -g orgs.txt --fresh
 ```
 
-## Branch Scanning Mode
+**Note:** Resume support works with the `--use-search-api` mode. For the default local scan mode, use the package cache (`*.packages.json`) to avoid re-fetching files.
 
-By default, the scanner uses GitHub's Code Search API which only searches the default branch. To scan all active branches:
+## Scanning Modes
+
+### Default Mode: Default Branch Only
+
+By default, the scanner fetches package files from the default branch (usually `main` or `master`) of each repository. This is fast and covers most use cases.
 
 ```bash
-# Scan all branches with commits in the last 30 days
-shai-hulud-scanner -g my-org --scan-branches
-
-# Scan branches with commits in the last 7 days
-shai-hulud-scanner -g my-org --scan-branches --branch-age 7
+shai-hulud-scanner -g orgs.txt
 ```
 
-Branch scanning works in two phases:
-1. **Discovery**: Lists all repos and their active branches, saves to `outputs/<org>.branches.json`
-2. **Scanning**: Fetches `package.json` and `package-lock.json` from each branch and checks for compromised packages
+### Branch Scanning Mode: All Active Branches
 
-**Note**: Branch scanning makes more API calls than code search mode and is slower, but provides complete coverage across all active branches.
+To scan all active branches in each repository, use the `--scan-branches` flag:
+
+```bash
+# Scan all branches with commits in the last 30 days (default)
+shai-hulud-scanner -g orgs.txt --scan-branches
+
+# Scan branches with commits in the last 7 days only
+shai-hulud-scanner -g orgs.txt --scan-branches --branch-age 7
+
+# Scan branches from the last 60 days
+shai-hulud-scanner -g orgs.txt --scan-branches --branch-age 60
+```
+
+**How it works:**
+1. For each repository, the scanner fetches all branches
+2. Filters branches by age (commits in last N days, default 30)
+3. Fetches package files (`package.json`, `package-lock.json`, `pnpm-lock.yaml`) from each active branch
+4. Results include branch information: `owner/repo:branch-name`
+
+**Performance notes:**
+- Branch scanning makes significantly more API calls
+- Use `--branch-age` to limit the number of branches scanned
+- Use `--repo-age` to skip old repositories entirely
+- Recommended concurrency: 1-5 for branch scanning (to avoid rate limits)
+
+**Example: Fast scan of recently updated code**
+```bash
+# Only scan repos updated in last 7 days, only branches from last 7 days
+shai-hulud-scanner -g orgs.txt --scan-branches --repo-age 7 --branch-age 7 -c 3
+```
 
 ## Sample Output
 
