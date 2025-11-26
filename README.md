@@ -22,7 +22,10 @@ shai-hulud-scanner -g <github-org> [-c <concurrency>] [-d] [--fresh] [--scan-bra
 
 **From source (no install):**
 ```bash
-PYTHONPATH=src python -m shai_hulud_scanner -g <github-org>
+
+
+
+python -m shai_hulud_scanner -g <github-org>
 ```
 
 ### Options

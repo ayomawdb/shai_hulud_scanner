@@ -374,17 +374,19 @@ async def async_main(args: argparse.Namespace) -> int:
     # Parse organizations if provided
     orgs: list[str] = []
     if args.org:
-        # Check if it's a file or single org/comma-separated list
-        if Path(args.org).is_file():
-            orgs = load_orgs_from_file(args.org)
-            log_info(f"Loaded {len(orgs)} organizations from {args.org}")
-        elif ',' in args.org:
-            # Comma-separated list
-            orgs = [o.strip() for o in args.org.split(',') if o.strip()]
-            log_info(f"Scanning {len(orgs)} specified organizations")
-        else:
-            # Single organization
-            orgs = [args.org]
+        # -g always expects a file path
+        org_file_path = Path(args.org).resolve()
+        if not org_file_path.is_file():
+            log_error(f"Organization file not found: {org_file_path}")
+            return 1
+
+        log_info(f"Reading organization list from: {org_file_path}")
+        orgs = load_orgs_from_file(str(org_file_path))
+        log_info(f"Loaded {len(orgs)} organizations from file")
+
+        if not orgs:
+            log_error(f"No valid organizations found in {org_file_path}")
+            return 1
 
     # Parse repos if provided
     repos: Optional[list[str]] = None
@@ -787,7 +789,7 @@ def main() -> int:
     )
     parser.add_argument(
         '-g', '--org',
-        help='GitHub organization to scan (required unless --repos is used). Can be combined with --repos to limit scanning to specific repos within the org.'
+        help='File containing GitHub organization names to scan (one per line). Required unless --repos is used. Can be combined with --repos to limit scanning to specific repos within the orgs.'
     )
     parser.add_argument(
         '-r', '--repos',
