@@ -83,6 +83,78 @@ class PackageFetcher:
         log_info(f"Found {len(repos)} repositories")
         return repos
 
+    async def _find_package_files(self, repo: str) -> list[str]:
+        """
+        Find all package.json, package-lock.json, and pnpm-lock.yaml files in a repository.
+        Uses GitHub's Git Tree API to recursively find files.
+        Returns a list of file paths.
+        """
+        try:
+            # First, get the default branch SHA
+            proc = await asyncio.create_subprocess_exec(
+                'gh', 'api',
+                f'repos/{repo}',
+                '--jq', '.default_branch',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode != 0:
+                return []
+
+            default_branch = stdout.decode().strip()
+
+            # Get the tree SHA for the default branch
+            proc = await asyncio.create_subprocess_exec(
+                'gh', 'api',
+                f'repos/{repo}/git/trees/{default_branch}',
+                '--jq', '.sha',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode != 0:
+                return []
+
+            tree_sha = stdout.decode().strip()
+
+            # Get the full tree recursively
+            proc = await asyncio.create_subprocess_exec(
+                'gh', 'api',
+                f'repos/{repo}/git/trees/{tree_sha}?recursive=1',
+                '--jq', '.tree[] | select(.type == "blob") | .path',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode != 0:
+                return []
+
+            output = stdout.decode().strip()
+            if not output:
+                return []
+
+            # Filter for package files
+            all_paths = output.split('\n')
+            package_paths = []
+
+            for path in all_paths:
+                filename = path.split('/')[-1]
+                if filename in self.PACKAGE_FILES:
+                    package_paths.append(path)
+
+            if package_paths:
+                log_debug(f"  Found {len(package_paths)} package file(s) in {repo}")
+
+            return package_paths
+
+        except Exception as e:
+            log_debug(f"Error finding package files in {repo}: {e}")
+            return []
+
     async def _fetch_file_content(self, repo: str, file_path: str) -> Optional[tuple[str, str]]:
         """
         Fetch a file's content from a repository.
@@ -224,12 +296,19 @@ class PackageFetcher:
     async def _fetch_repo_packages(
         self, repo: str, index: int, total: int
     ) -> list[PackageFileInfo]:
-        """Fetch all package files from a single repository."""
+        """Fetch all package files from a single repository, including subdirectories."""
         async with self.semaphore:
             log_progress(index, total, f"Fetching: {repo}")
 
+            # First, try to find all package files in the repo (including subdirectories)
+            package_file_paths = await self._find_package_files(repo)
+
+            # If search API found nothing, fall back to checking root directory
+            if not package_file_paths:
+                package_file_paths = self.PACKAGE_FILES
+
             files = []
-            for file_path in self.PACKAGE_FILES:
+            for file_path in package_file_paths:
                 result = await self._fetch_file_content(repo, file_path)
                 if result:
                     content, html_url = result
