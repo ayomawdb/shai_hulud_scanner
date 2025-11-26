@@ -252,13 +252,20 @@ class PackageFetcher:
             log_debug(f"Error fetching {repo}/{file_path}: {e}")
             return None
 
-    def _extract_dependencies(self, content: str, file_path: str) -> dict[str, str]:
+    def _extract_dependencies(self, content: str, file_path: str) -> dict[str, list[str]]:
         """
         Extract all dependencies from package.json, package-lock.json, or pnpm-lock.yaml.
-        Returns a dict mapping package name to version.
+        Returns a dict mapping package name to list of versions (supports multiple versions per package).
         """
-        dependencies: dict[str, str] = {}
+        dependencies: dict[str, list[str]] = {}
         log_debug(f"    _extract_dependencies: Processing {file_path}")
+
+        def add_dependency(name: str, version: str):
+            """Helper to add a dependency, supporting multiple versions."""
+            if name not in dependencies:
+                dependencies[name] = []
+            if version not in dependencies[name]:
+                dependencies[name].append(version)
 
         # Handle pnpm-lock.yaml
         if 'pnpm-lock' in file_path:
@@ -292,17 +299,21 @@ class PackageFetcher:
                             parts = pkg_path[1:].rsplit('/', 1)  # Split from the right to get name and version
                             if len(parts) == 2:
                                 name, version = parts
-                                # Handle scoped packages like '@babel/core'
-                                if name.startswith('@') or '/' in name:
-                                    dependencies[name] = version
-                                else:
-                                    dependencies[name] = version
+                                add_dependency(name, version)
                             elif len(parts) == 1:
                                 # Sometimes version is in the pkg_info
                                 name = parts[0]
                                 version = pkg_info.get('version')
                                 if version:
-                                    dependencies[name] = version
+                                    add_dependency(name, version)
+
+                        # IMPORTANT: Also extract transitive dependencies from the dependencies field
+                        # This captures version ranges like "@babel/compat-data": "^7.21.5"
+                        pkg_dependencies = pkg_info.get('dependencies', {})
+                        if isinstance(pkg_dependencies, dict):
+                            for dep_name, dep_version in pkg_dependencies.items():
+                                if isinstance(dep_version, str):
+                                    add_dependency(dep_name, dep_version)
 
             # Also check dependencies section (older pnpm format)
             if 'dependencies' in pkg_data:
@@ -310,9 +321,9 @@ class PackageFetcher:
                 if isinstance(deps, dict):
                     for name, version_info in deps.items():
                         if isinstance(version_info, str):
-                            dependencies[name] = version_info
+                            add_dependency(name, version_info)
                         elif isinstance(version_info, dict) and 'version' in version_info:
-                            dependencies[name] = version_info['version']
+                            add_dependency(name, version_info['version'])
 
             return dependencies
 
@@ -338,28 +349,43 @@ class PackageFetcher:
                         name = pkg_info.get('name')
                         version = pkg_info.get('version')
                         if name and version:
-                            dependencies[name] = version
+                            add_dependency(name, version)
                         # Also extract from node_modules path
                         elif 'node_modules/' in pkg_path and version:
-                            # Extract name from path like "node_modules/lodash"
+                            # Extract name from path like "node_modules/lodash" or "node_modules/@babel/core"
                             parts = pkg_path.split('node_modules/')
                             if len(parts) > 1:
                                 name = parts[-1]
-                                dependencies[name] = version
+                                add_dependency(name, version)
 
-                log_debug(f"    Extracted {len(dependencies)} dependencies from packages key")
+                        # IMPORTANT: Also extract transitive dependencies from the dependencies field
+                        # This captures version ranges like "@babel/compat-data": "^7.21.5"
+                        pkg_dependencies = pkg_info.get('dependencies', {})
+                        if isinstance(pkg_dependencies, dict):
+                            for dep_name, dep_version in pkg_dependencies.items():
+                                if isinstance(dep_version, str):
+                                    add_dependency(dep_name, dep_version)
+
+                unique_packages = len(dependencies)
+                total_versions = sum(len(versions) for versions in dependencies.values())
+                log_debug(f"    Extracted {unique_packages} unique packages with {total_versions} total versions from packages key")
 
             # package-lock.json v1 format (dependencies key with nested structure)
             if 'dependencies' in pkg_data:
                 log_debug(f"    Found 'dependencies' key (v1 format)")
-                deps_before = len(dependencies)
-                self._extract_v1_dependencies(pkg_data['dependencies'], dependencies)
-                log_debug(f"    Extracted {len(dependencies) - deps_before} additional dependencies from v1 format")
+                deps_before_unique = len(dependencies)
+                deps_before_total = sum(len(versions) for versions in dependencies.values())
+                self._extract_v1_dependencies(pkg_data['dependencies'], dependencies, add_dependency)
+                deps_after_unique = len(dependencies)
+                deps_after_total = sum(len(versions) for versions in dependencies.values())
+                log_debug(f"    Extracted {deps_after_unique - deps_before_unique} additional unique packages, {deps_after_total - deps_before_total} additional versions from v1 format")
 
-            log_debug(f"    Total dependencies from package-lock.json: {len(dependencies)}")
+            unique_packages = len(dependencies)
+            total_versions = sum(len(versions) for versions in dependencies.values())
+            log_debug(f"    Total from package-lock.json: {unique_packages} unique packages with {total_versions} total versions")
 
         else:
-            # package.json format
+            # package.json format - only one version per package here
             log_debug(f"    Processing package.json format")
             for dep_type in ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']:
                 deps = pkg_data.get(dep_type, {})
@@ -367,26 +393,28 @@ class PackageFetcher:
                     deps_count = 0
                     for name, version in deps.items():
                         if isinstance(version, str):
-                            dependencies[name] = version
+                            add_dependency(name, version)
                             deps_count += 1
                     if deps_count > 0:
                         log_debug(f"    Found {deps_count} {dep_type}")
 
             log_debug(f"    Total dependencies from package.json: {len(dependencies)}")
 
-        log_debug(f"    Returning {len(dependencies)} total dependencies")
+        unique_packages = len(dependencies)
+        total_versions = sum(len(versions) for versions in dependencies.values())
+        log_debug(f"    Returning {unique_packages} unique packages with {total_versions} total versions")
         return dependencies
 
-    def _extract_v1_dependencies(self, deps: dict, result: dict[str, str]):
+    def _extract_v1_dependencies(self, deps: dict, result: dict[str, list[str]], add_func):
         """Recursively extract dependencies from package-lock.json v1 format."""
         for name, info in deps.items():
             if isinstance(info, dict):
                 version = info.get('version')
                 if version:
-                    result[name] = version
+                    add_func(name, version)
                 # Recurse into nested dependencies
                 if 'dependencies' in info:
-                    self._extract_v1_dependencies(info['dependencies'], result)
+                    self._extract_v1_dependencies(info['dependencies'], result, add_func)
 
     async def _fetch_repo_packages(
         self, repo: str, index: int, total: int

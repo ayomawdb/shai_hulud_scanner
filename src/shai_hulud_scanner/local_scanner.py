@@ -79,7 +79,11 @@ class LocalScanner:
             if lib_name not in pkg_file.dependencies:
                 continue
 
-            found_version = pkg_file.dependencies[lib_name]
+            # Dependencies is now a list of versions - check all of them
+            found_versions = pkg_file.dependencies[lib_name]
+            if not isinstance(found_versions, list):
+                # Handle old cache format where it was a single string
+                found_versions = [found_versions]
 
             # Find line number in raw content
             line_number = None
@@ -91,61 +95,63 @@ class LocalScanner:
             if line_number:
                 url = f"{pkg_file.html_url}#L{line_number}"
 
-            # Check if versions match (pass file_path for semver range checking)
-            is_match = self._check_version_match(found_version, lib_version, pkg_file.file_path)
+            # Check each version found
+            for found_version in found_versions:
+                # Check if versions match (pass file_path for semver range checking)
+                is_match = self._check_version_match(found_version, lib_version, pkg_file.file_path)
 
-            # Record finding (even if version doesn't match)
-            finding = LibraryFinding(
-                repository=pkg_file.repository,
-                file=pkg_file.file_path,
-                url=url,
-                searched_library=lib_name,
-                searched_version=lib_version,
-                found_version=found_version,
-                is_match=is_match,
-                line_number=line_number,
-            )
-            self.all_findings.append(finding)
-
-            if not is_match:
-                log_debug(
-                    f"Version mismatch: {lib_name}@{lib_version} vs "
-                    f"found {found_version} in {pkg_file.repository}/{pkg_file.file_path}"
+                # Record finding (even if version doesn't match)
+                finding = LibraryFinding(
+                    repository=pkg_file.repository,
+                    file=pkg_file.file_path,
+                    url=url,
+                    searched_library=lib_name,
+                    searched_version=lib_version,
+                    found_version=found_version,
+                    is_match=is_match,
+                    line_number=line_number,
                 )
-                continue
+                self.all_findings.append(finding)
 
-            # Check if we've already detected this
-            detection_key = f"{pkg_file.repository}:{pkg_file.file_path}:{lib_name}@{lib_version}"
-            if detection_key in self.seen_detections:
-                log_debug(f"Skipping duplicate detection: {detection_key}")
-                continue
+                if not is_match:
+                    log_debug(
+                        f"Version mismatch: {lib_name}@{lib_version} vs "
+                        f"found {found_version} in {pkg_file.repository}/{pkg_file.file_path}"
+                    )
+                    continue
 
-            self.seen_detections.add(detection_key)
+                # Check if we've already detected this specific version
+                detection_key = f"{pkg_file.repository}:{pkg_file.file_path}:{lib_name}@{found_version}"
+                if detection_key in self.seen_detections:
+                    log_debug(f"Skipping duplicate detection: {detection_key}")
+                    continue
 
-            # Create detection result
-            result = SearchResult(
-                repository=pkg_file.repository,
-                file=pkg_file.file_path,
-                url=url,
-                library=lib_name,
-                version=lib_version,
-                line_number=line_number,
-            )
-            self.results.append(result)
-            self.detection_count += 1
+                self.seen_detections.add(detection_key)
 
-            # Log the detection with matched lines
-            matched_lines = []
-            if pkg_file.raw_content and line_number:
-                lines = pkg_file.raw_content.split('\n')
-                # Get context around the match
-                start = max(0, line_number - 1)
-                end = min(len(lines), line_number + 2)
-                for i in range(start, end):
-                    matched_lines.append((i + 1, lines[i]))
+                # Create detection result
+                result = SearchResult(
+                    repository=pkg_file.repository,
+                    file=pkg_file.file_path,
+                    url=url,
+                    library=lib_name,
+                    version=found_version,  # Use the actual found version
+                    line_number=line_number,
+                )
+                self.results.append(result)
+                self.detection_count += 1
 
-            log_detection(
-                lib_name, lib_version,
+                # Log the detection with matched lines
+                matched_lines = []
+                if pkg_file.raw_content and line_number:
+                    lines = pkg_file.raw_content.split('\n')
+                    # Get context around the match
+                    start = max(0, line_number - 1)
+                    end = min(len(lines), line_number + 2)
+                    for i in range(start, end):
+                        matched_lines.append((i + 1, lines[i]))
+
+                log_detection(
+                    lib_name, found_version,
                 pkg_file.repository, pkg_file.file_path, url,
                 matched_lines=matched_lines if matched_lines else None
             )

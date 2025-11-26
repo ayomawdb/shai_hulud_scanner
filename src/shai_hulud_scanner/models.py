@@ -87,7 +87,7 @@ class PackageFileInfo:
     repository: str
     file_path: str
     html_url: str
-    dependencies: dict = field(default_factory=dict)  # name -> version mapping
+    dependencies: dict = field(default_factory=dict)  # name -> list of versions (supports multiple versions)
     raw_content: Optional[str] = None  # Original JSON content for line number lookup
 
     def to_dict(self) -> dict:
