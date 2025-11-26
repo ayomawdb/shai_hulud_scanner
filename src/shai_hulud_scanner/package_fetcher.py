@@ -29,7 +29,9 @@ class PackageFetcher:
         org: str,
         concurrency: int = 10,
         repos: Optional[list[str]] = None,
-        max_repo_age_days: int = 30
+        max_repo_age_days: int = 30,
+        scan_branches: bool = False,
+        max_branch_age_days: int = 30
     ):
         self.org = org
         self.concurrency = concurrency
@@ -37,6 +39,9 @@ class PackageFetcher:
         self.repos = repos  # Optional list of specific repos to scan
         self.max_repo_age_days = max_repo_age_days
         self.repo_age_cutoff = datetime.now(timezone.utc) - timedelta(days=max_repo_age_days)
+        self.scan_branches = scan_branches  # Whether to scan all active branches
+        self.max_branch_age_days = max_branch_age_days
+        self.branch_age_cutoff = datetime.now(timezone.utc) - timedelta(days=max_branch_age_days)
 
     async def list_repos(self) -> list[str]:
         """List all repositories in the organization."""
@@ -125,14 +130,14 @@ class PackageFetcher:
             # If error, don't skip (safer to scan)
             return False
 
-    async def _find_package_files(self, repo: str) -> list[str]:
+    async def _get_active_branches(self, repo: str) -> list[tuple[str, str]]:
         """
-        Find all package.json, package-lock.json, and pnpm-lock.yaml files in a repository.
-        Uses GitHub's Git Tree API to recursively find files.
-        Returns a list of file paths.
+        Get list of active branches (name, sha) for a repository.
+        Filters by branch age if scan_branches is enabled.
+        Returns [(branch_name, sha), ...] or just default branch if scan_branches is False.
         """
         try:
-            # First, get the default branch SHA
+            # Get default branch
             proc = await asyncio.create_subprocess_exec(
                 'gh', 'api',
                 f'repos/{repo}',
@@ -147,10 +152,114 @@ class PackageFetcher:
 
             default_branch = stdout.decode().strip()
 
-            # Get the tree SHA for the default branch
+            # If not scanning branches, return only default branch
+            if not self.scan_branches:
+                # Get default branch SHA
+                proc = await asyncio.create_subprocess_exec(
+                    'gh', 'api',
+                    f'repos/{repo}/git/refs/heads/{default_branch}',
+                    '--jq', '.object.sha',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode == 0:
+                    sha = stdout.decode().strip()
+                    if sha:
+                        return [(default_branch, sha)]
+                return []
+
+            # Scan all active branches
+            log_debug(f"  Fetching branches for {repo}")
+            all_branches = []
+            page = 1
+            per_page = 100
+
+            while True:
+                branches_endpoint = f'repos/{repo}/branches?per_page={per_page}&page={page}'
+                proc = await asyncio.create_subprocess_exec(
+                    'gh', 'api',
+                    branches_endpoint,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await proc.communicate()
+
+                if proc.returncode != 0:
+                    log_debug(f"  Error fetching branches for {repo}: {stderr.decode().strip()}")
+                    break
+
+                try:
+                    branches_data = json.loads(stdout.decode().strip())
+                    if not isinstance(branches_data, list) or not branches_data:
+                        break
+
+                    all_branches.extend(branches_data)
+                    if len(branches_data) < per_page:
+                        break
+                    page += 1
+                except json.JSONDecodeError:
+                    break
+
+            # Filter by age
+            active_branches = []
+            for branch_item in all_branches:
+                if not isinstance(branch_item, dict):
+                    continue
+
+                branch_name = branch_item.get('name')
+                branch_sha = branch_item.get('commit', {}).get('sha')
+
+                if not branch_name or not branch_sha:
+                    continue
+
+                # Get commit date
+                commit_date = await self._get_commit_date(repo, branch_sha)
+                if commit_date and commit_date >= self.branch_age_cutoff:
+                    active_branches.append((branch_name, branch_sha))
+                else:
+                    log_debug(f"  Skipping old branch {repo}:{branch_name}")
+
+            log_debug(f"  Found {len(active_branches)} active branches in {repo}")
+            return active_branches
+
+        except Exception as e:
+            log_debug(f"Error getting branches for {repo}: {e}")
+            return []
+
+    async def _get_commit_date(self, repo: str, sha: str) -> Optional[datetime]:
+        """Get the commit date for a specific SHA."""
+        try:
             proc = await asyncio.create_subprocess_exec(
                 'gh', 'api',
-                f'repos/{repo}/git/trees/{default_branch}',
+                f'repos/{repo}/commits/{sha}',
+                '--jq', '.commit.committer.date',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode != 0:
+                return None
+
+            date_str = stdout.decode().strip()
+            if date_str:
+                return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            return None
+        except Exception:
+            return None
+
+    async def _find_package_files(self, repo: str, branch_or_sha: str) -> list[str]:
+        """
+        Find all package.json, package-lock.json, and pnpm-lock.yaml files in a repository branch.
+        Uses GitHub's Git Tree API to recursively find files.
+        Returns a list of file paths.
+        """
+        try:
+            # Get the tree SHA for the branch/sha
+            proc = await asyncio.create_subprocess_exec(
+                'gh', 'api',
+                f'repos/{repo}/git/trees/{branch_or_sha}',
                 '--jq', '.sha',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -189,25 +298,30 @@ class PackageFetcher:
                     package_paths.append(path)
 
             if package_paths:
-                log_debug(f"  Found {len(package_paths)} package file(s) in {repo}")
+                log_debug(f"  Found {len(package_paths)} package file(s) in {repo}:{branch_or_sha}")
 
             return package_paths
 
         except Exception as e:
-            log_debug(f"Error finding package files in {repo}: {e}")
+            log_debug(f"Error finding package files in {repo}:{branch_or_sha}: {e}")
             return []
 
-    async def _fetch_file_content(self, repo: str, file_path: str) -> Optional[tuple[str, str]]:
+    async def _fetch_file_content(self, repo: str, file_path: str, ref: Optional[str] = None) -> Optional[tuple[str, str]]:
         """
-        Fetch a file's content from a repository.
+        Fetch a file's content from a repository at a specific ref (branch/sha).
         Returns (content, html_url) or None if file doesn't exist.
         Uses Git Blob API to handle large files (>1MB).
         """
         try:
+            # Build contents API URL with optional ref parameter
+            contents_url = f'repos/{repo}/contents/{file_path}'
+            if ref:
+                contents_url += f'?ref={ref}'
+
             # First, get the file's SHA and metadata using Contents API
             proc = await asyncio.create_subprocess_exec(
                 'gh', 'api',
-                f'repos/{repo}/contents/{file_path}',
+                contents_url,
                 '--jq', '{sha: .sha, html_url: .html_url, size: .size}',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -419,7 +533,7 @@ class PackageFetcher:
     async def _fetch_repo_packages(
         self, repo: str, index: int, total: int
     ) -> list[PackageFileInfo]:
-        """Fetch all package files from a single repository, including subdirectories."""
+        """Fetch all package files from a single repository, optionally scanning all active branches."""
         async with self.semaphore:
             log_progress(index, total, f"Fetching: {repo}")
 
@@ -427,43 +541,60 @@ class PackageFetcher:
             if await self._should_skip_repo(repo):
                 return []
 
-            # First, try to find all package files in the repo (including subdirectories)
-            package_file_paths = await self._find_package_files(repo)
+            # Get branches to scan (either just default branch or all active branches)
+            branches = await self._get_active_branches(repo)
+            if not branches:
+                log_debug(f"  No branches found for {repo}")
+                return []
 
-            # If search API found nothing, fall back to checking root directory
-            if not package_file_paths:
-                log_debug(f"  No package files found via tree API, checking root directory")
-                package_file_paths = self.PACKAGE_FILES
-            else:
-                log_debug(f"  Package files to fetch: {package_file_paths}")
+            if self.scan_branches:
+                log_debug(f"  Scanning {len(branches)} active branches in {repo}")
 
-            files = []
-            for file_path in package_file_paths:
-                log_debug(f"  Fetching: {file_path}")
-                result = await self._fetch_file_content(repo, file_path)
-                if result:
-                    content, html_url = result
-                    log_debug(f"  Successfully fetched {file_path} ({len(content)} bytes)")
-                    dependencies = self._extract_dependencies(content, file_path)
-                    log_debug(f"  Extracted {len(dependencies)} dependencies from {file_path}")
+            all_files = []
 
-                    if dependencies:  # Only include if there are dependencies
-                        files.append(PackageFileInfo(
-                            repository=repo,
-                            file_path=file_path,
-                            html_url=html_url,
-                            dependencies=dependencies,
-                            raw_content=content,
-                        ))
-                        log_debug(f"  ✓ Added {file_path} with {len(dependencies)} dependencies")
-                    else:
-                        log_debug(f"  ✗ Skipping {file_path} - no dependencies found")
+            # Fetch package files from each branch
+            for branch_name, branch_sha in branches:
+                log_debug(f"  Processing branch: {branch_name} (SHA: {branch_sha[:8]})")
+
+                # Find all package files in this branch
+                package_file_paths = await self._find_package_files(repo, branch_sha)
+
+                # If search API found nothing, fall back to checking root directory
+                if not package_file_paths:
+                    log_debug(f"    No package files found via tree API, checking root directory")
+                    package_file_paths = self.PACKAGE_FILES
                 else:
-                    log_debug(f"  ✗ Failed to fetch {file_path}")
+                    log_debug(f"    Package files to fetch: {package_file_paths}")
+
+                # Fetch each package file
+                for file_path in package_file_paths:
+                    log_debug(f"    Fetching: {file_path}")
+                    result = await self._fetch_file_content(repo, file_path, branch_sha)
+                    if result:
+                        content, html_url = result
+                        log_debug(f"    Successfully fetched {file_path} ({len(content)} bytes)")
+                        dependencies = self._extract_dependencies(content, file_path)
+                        log_debug(f"    Extracted {len(dependencies)} dependencies from {file_path}")
+
+                        if dependencies:  # Only include if there are dependencies
+                            # Include branch info in repository field for branch scans
+                            repo_identifier = f"{repo}:{branch_name}" if self.scan_branches else repo
+                            all_files.append(PackageFileInfo(
+                                repository=repo_identifier,
+                                file_path=file_path,
+                                html_url=html_url,
+                                dependencies=dependencies,
+                                raw_content=content,
+                            ))
+                            log_debug(f"    ✓ Added {file_path} with {len(dependencies)} dependencies")
+                        else:
+                            log_debug(f"    ✗ Skipping {file_path} - no dependencies found")
+                    else:
+                        log_debug(f"    ✗ Failed to fetch {file_path}")
 
             # Small delay to avoid rate limiting
             await asyncio.sleep(0.1)
-            return files
+            return all_files
 
     async def fetch_all(self) -> PackageCache:
         """
@@ -481,10 +612,17 @@ class PackageFetcher:
                 files=[],
             )
 
-        if self.max_repo_age_days > 0:
-            log_info(f"Fetching package files from {len(repos)} repositories (filtering repos older than {self.max_repo_age_days} days)...")
+        # Build informative log message
+        mode_info = []
+        if self.scan_branches:
+            mode_info.append(f"scanning all active branches from last {self.max_branch_age_days} days")
         else:
-            log_info(f"Fetching package files from {len(repos)} repositories...")
+            mode_info.append("scanning default branch only")
+
+        if self.max_repo_age_days > 0:
+            mode_info.append(f"filtering repos older than {self.max_repo_age_days} days")
+
+        log_info(f"Fetching package files from {len(repos)} repositories ({', '.join(mode_info)})...")
 
         # Fetch all repos concurrently with semaphore limiting
         tasks = [

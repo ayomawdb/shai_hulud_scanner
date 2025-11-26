@@ -290,17 +290,15 @@ async def scan_single_org(
     args.org = org
 
     try:
-        # Branch scanning mode
-        if args.scan_branches:
-            return await run_branch_scan(args, libraries, paths, None)
-
         # Check if we should use local scan mode (default) or legacy search mode
         if args.use_search_api:
             log_info(f"Scanning organization: {org} (using legacy GitHub Code Search API mode)")
             return await run_code_search_scan(args, libraries, paths, None)
         else:
             # Default: local scan mode (much faster)
-            log_info(f"Scanning organization: {org} (using local scan mode)")
+            # Branch scanning is now handled within PackageFetcher
+            mode_desc = "with branch scanning" if args.scan_branches else "default branch only"
+            log_info(f"Scanning organization: {org} (using local scan mode, {mode_desc})")
             return await run_local_scan(args, libraries, paths, None, org)
     finally:
         # Restore original org
@@ -473,16 +471,13 @@ async def async_main(args: argparse.Namespace) -> int:
         write_duplicates_list(duplicates, paths['duplicates'])
         log_info(f"Duplicates list written to: {paths['duplicates']}")
 
-    # Branch scanning mode
-    if args.scan_branches:
-        return await run_branch_scan(args, libraries, paths, repos)
-
     # Check if we should use local scan mode (default) or legacy search mode
     if args.use_search_api:
         log_info("Using legacy GitHub Code Search API mode")
         return await run_code_search_scan(args, libraries, paths, repos)
     else:
         # Default: local scan mode (much faster)
+        # Branch scanning is now handled within PackageFetcher
         return await run_local_scan(args, libraries, paths, repos, scan_name)
 
 
@@ -679,7 +674,14 @@ async def run_local_scan(
         log_info("Fetching package files from repositories...")
         # Use repo_age parameter (0 means scan all repos regardless of age)
         max_repo_age = args.repo_age if args.repo_age > 0 else 36500  # ~100 years = effectively no limit
-        fetcher = PackageFetcher(org_name, args.concurrency, repos, max_repo_age)
+        fetcher = PackageFetcher(
+            org_name,
+            args.concurrency,
+            repos,
+            max_repo_age,
+            scan_branches=args.scan_branches,
+            max_branch_age_days=args.branch_age
+        )
         cache = await fetcher.fetch_all()
         save_cache(cache, cache_file)
 
