@@ -126,6 +126,15 @@ Instead of scanning an entire organization, you can scan specific repositories:
    shai-hulud-scanner -r owner/repo1,owner/repo2
    ```
 
+3. **Limit org scan to specific repos** (combine `-g` and `-r`):
+   ```bash
+   # Scan only specific repos within an organization
+   shai-hulud-scanner -g my-org -r repos.txt
+
+   # Or with comma-separated list
+   shai-hulud-scanner -g my-org -r my-org/repo1,my-org/repo2
+   ```
+
 Supported repository formats:
 - `owner/repo` - Direct format
 - `https://github.com/owner/repo` - Full URL
@@ -139,6 +148,9 @@ shai-hulud-scanner -r repos.txt --scan-branches
 
 # Scan branches with commits in the last 7 days
 shai-hulud-scanner -r repos.txt --scan-branches --branch-age 7
+
+# Scan specific repos within an org, including branches
+shai-hulud-scanner -g my-org -r repos.txt --scan-branches
 ```
 
 ## Directory Structure
