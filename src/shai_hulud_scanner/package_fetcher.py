@@ -201,12 +201,14 @@ class PackageFetcher:
         """
         Fetch a file's content from a repository.
         Returns (content, html_url) or None if file doesn't exist.
+        Uses Git Blob API to handle large files (>1MB).
         """
         try:
+            # First, get the file's SHA and metadata using Contents API
             proc = await asyncio.create_subprocess_exec(
                 'gh', 'api',
                 f'repos/{repo}/contents/{file_path}',
-                '--jq', '{content: .content, html_url: .html_url}',
+                '--jq', '{sha: .sha, html_url: .html_url, size: .size}',
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -216,9 +218,35 @@ class PackageFetcher:
                 # File doesn't exist or other error - this is normal
                 return None
 
-            data = json.loads(stdout.decode().strip())
-            content = base64.b64decode(data['content']).decode('utf-8')
-            return content, data['html_url']
+            metadata = json.loads(stdout.decode().strip())
+            file_sha = metadata.get('sha')
+            html_url = metadata.get('html_url')
+            file_size = metadata.get('size', 0)
+
+            if not file_sha or not html_url:
+                log_debug(f"Missing sha or html_url for {repo}/{file_path}")
+                return None
+
+            log_debug(f"    File size: {file_size} bytes, SHA: {file_sha[:8]}")
+
+            # Use Git Blob API to fetch content (handles large files)
+            proc = await asyncio.create_subprocess_exec(
+                'gh', 'api',
+                f'repos/{repo}/git/blobs/{file_sha}',
+                '--jq', '.content',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode != 0:
+                log_debug(f"Error fetching blob for {repo}/{file_path}: {stderr.decode().strip()}")
+                return None
+
+            # Decode base64 content
+            content_b64 = stdout.decode().strip().strip('"')
+            content = base64.b64decode(content_b64).decode('utf-8')
+            return content, html_url
 
         except Exception as e:
             log_debug(f"Error fetching {repo}/{file_path}: {e}")

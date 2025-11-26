@@ -411,12 +411,22 @@ async def async_main(args: argparse.Namespace) -> int:
         log_error("Either --org or --repos is required")
         return 1
 
-    # Repos mode takes precedence over multi-org mode
-    if repos:
-        # Use first repo's owner as the org name for display
+    # Determine scan mode
+    if repos and orgs:
+        # Org + repos mode: scan specific repos within the org
+        if len(orgs) > 1:
+            log_error("Cannot specify multiple organizations with --repos. Use --repos alone or with a single --org.")
+            return 1
+        org = orgs[0]
+        scan_name = f"{org}-{len(repos)}repos" if len(repos) > 1 else org
+        args.org = org
+        log_info(f"Scanning {len(repos)} specific repositories in organization {org}")
+    elif repos:
+        # Repos-only mode: scan specific repos (may be from different orgs)
         org = repos[0].split('/')[0] if repos else 'repos'
         scan_name = f"{org}-{len(repos)}repos" if len(repos) > 1 else repos[0].replace('/', '-')
         args.org = org  # Set for internal functions that expect it
+        log_info(f"Scanning {len(repos)} specific repositories")
     elif len(orgs) > 1:
         # Multi-org mode
         return await scan_multiple_orgs(args, orgs)
@@ -777,11 +787,11 @@ def main() -> int:
     )
     parser.add_argument(
         '-g', '--org',
-        help='GitHub organization to scan (required unless --repos is used)'
+        help='GitHub organization to scan (required unless --repos is used). Can be combined with --repos to limit scanning to specific repos within the org.'
     )
     parser.add_argument(
         '-r', '--repos',
-        help='File containing repository URLs to scan (one per line), or comma-separated list of repos'
+        help='File containing repository URLs to scan (one per line), or comma-separated list of repos. Can be used alone or with --org to limit scanning.'
     )
     parser.add_argument(
         '-c', '--concurrency',
